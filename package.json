@@ -1,0 +1,15 @@
+{
+  "name": "stegverse-scw",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^9.3.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.2.5",
+    "markdownlint-cli": "^0.41.0"
+  },
+  "scripts": {
+    "lint:js": "eslint . --ext .js,.jsx,.ts,.tsx || true",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md,yml,yaml,css,html}\"",
+    "lint:md": "markdownlint \"**/*.md\" -i node_modules"
+  }
+}

@@ -1,0 +1,27 @@
+
+====================================
+All-in-One Quickstart (iPhone OK)
+====================================
+A) Import bundle into GitHub (once)
+-----------------------------------
+1) Safari → github.com → New repo (e.g., steg-scw) → Create.
+2) Open a Codespace (Code → Codespaces → Create).
+3) Upload the bundle zip into the repo (Add file → Upload files → Commit).
+4) In Codespaces terminal:
+   unzip steg_scw_full.zip -d .
+   rm steg_scw_full.zip
+   git add .
+   git commit -s -m "chore: import SCW full bundle"
+   git push origin main
+
+B) One-prompt setup (auth, protect main, secrets, first deploy)
+---------------------------------------------------------------
+  ./scripts/one_prompt_setup.sh
+
+C) Public site (external repo) one-prompt
+-----------------------------------------
+  scripts/site/one_prompt_public_site.sh
+
+D) First-run (bootstrap → deploy → status)
+------------------------------------------
+  ./scripts/first_run.sh

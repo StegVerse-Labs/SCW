@@ -1,0 +1,5 @@
+vault/
+secrets/age.key
+node_modules/
+*.zip
+reports/

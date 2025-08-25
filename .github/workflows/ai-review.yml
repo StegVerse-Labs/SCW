@@ -1,0 +1,15 @@
+
+name: PR Guidance (assistant stub)
+on: [pull_request]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Guidance
+        run: python3 scripts/ci/ai_reviewer_stub.py > review.txt
+      - name: Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: review.txt

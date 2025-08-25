@@ -1,0 +1,19 @@
+
+name: Uptime Probe
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install deps
+        run: pip install requests
+      - name: Probe & update
+        run: python scripts/status/uptime_probe.py
+      - name: Publish status
+        run: bash scripts/status/publish_status.sh
