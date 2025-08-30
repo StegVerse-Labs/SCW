@@ -1,0 +1,33 @@
+name: guardrails
+on: {push: {branches: [main]}, workflow_dispatch: {}}
+permissions: {contents: read, issues: write}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          echo "REPO=${GITHUB_REPOSITORY}" >> $GITHUB_OUTPUT
+          echo "BR_URL=https://github.com/${GITHUB_REPOSITORY}/settings/branches" >> $GITHUB_OUTPUT
+          echo "PG_URL=https://github.com/${GITHUB_REPOSITORY}/settings/pages" >> $GITHUB_OUTPUT
+      - name: Open reminder issue if protections not set
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const repo = process.env.GITHUB_REPOSITORY;
+            const br = `https://github.com/${repo}/settings/branches`;
+            const pg = `https://github.com/${repo}/settings/pages`;
+            const title = "🔒 Enable branch protection & verify Pages";
+            const body = [
+              "Please enable branch protection on `main`:",
+              "- Require PR before merge",
+              "- Require review from Code Owners",
+              "- Require conversation resolution",
+              "- Require linear history",
+              "",
+              "Links:",
+              `- Branch protection: ${br}`,
+              `- Pages settings: ${pg}`
+            ].join("\n");
+            await github.rest.issues.create({ ...context.repo, title, body });
