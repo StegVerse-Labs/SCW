@@ -1,0 +1,56 @@
+name: StegVerse SCW Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "SCW command, e.g. self-test, autopatch, sync-templates, standardize-readme"
+        required: true
+        default: "self-test"
+      target_repo:
+        description: "Optional full repo name (e.g. StegVerse-Labs/TVC)"
+        required: false
+      args_json:
+        description: "Optional JSON args for the command"
+        required: false
+  repository_dispatch:
+    types: [scw-command]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  scw:
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+      ORG_GITHUB: StegVerse-Labs
+
+    steps:
+      - name: Checkout SCW
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run SCW core
+        env:
+          SCW_EVENT_NAME: ${{ github.event_name }}
+          SCW_INPUT_COMMAND: ${{ github.event.inputs.command }}
+          SCW_INPUT_TARGET_REPO: ${{ github.event.inputs.target_repo }}
+          SCW_INPUT_ARGS_JSON: ${{ github.event.inputs.args_json }}
+          SCW_DISPATCH_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          SCW_REPO: ${{ github.repository }}
+        run: |
+          python scw/scw_core.py
