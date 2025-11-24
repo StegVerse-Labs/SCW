@@ -1,7 +1,6 @@
-import os, json, sys, textwrap, datetime, subprocess
+import os, json, subprocess, tempfile, shutil, pathlib, datetime
 
 ORG = os.getenv("ORG_GITHUB", "StegVerse-Labs")
-SCW_REPO = os.getenv("SCW_REPO", "")
 
 def log(msg):
     print(f"[SCW] {msg}", flush=True)
@@ -13,35 +12,104 @@ def gh(*args):
         raise RuntimeError(res.stderr.strip() or res.stdout.strip())
     return res.stdout.strip()
 
-def get_default_branch(repo_full):
-    return gh("api", f"repos/{repo_full}", "--jq", ".default_branch")
-
 def list_org_repos():
     out = gh("api", f"orgs/{ORG}/repos", "--paginate", "--jq", ".[].full_name")
     return [line for line in out.splitlines() if line.strip()]
+
+def get_default_branch(repo_full):
+    return gh("api", f"repos/{repo_full}", "--jq", ".default_branch")
+
+TEMPLATES_DIR = pathlib.Path("scw/templates")
+
+def ensure_file(repo_dir: pathlib.Path, rel_path: str, template_name: str, replacements=None):
+    replacements = replacements or {}
+    target = repo_dir / rel_path
+    if target.exists():
+        log(f"Exists: {rel_path} (skip)")
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    template = (TEMPLATES_DIR / template_name).read_text()
+    for k, v in replacements.items():
+        template = template.replace(k, v)
+    target.write_text(template)
+    log(f"Added: {rel_path}")
+    return True
 
 def cmd_self_test(target_repo=None):
     log("Running self-test...")
     repos = list_org_repos()
     log(f"Token can see {len(repos)} repos in {ORG}.")
-    sample = repos[:10]
-    log("Sample repos: " + ", ".join(sample))
     if target_repo:
         branch = get_default_branch(target_repo)
         log(f"Target repo default branch: {branch}")
     log("Self-test PASS.")
 
 def cmd_autopatch(target_repo):
-    # placeholder - real autopatch comes next phase
-    log(f"Autopatch requested for {target_repo}. (stub)")
-    log("Autopatch stub PASS.")
+    log(f"Autopatch starting for {target_repo}...")
+
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        repo_dir = td / "repo"
+
+        log("Cloning repo...")
+        gh("repo", "clone", target_repo, str(repo_dir))
+
+        default_branch = get_default_branch(target_repo)
+        date_tag = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        branch_name = f"autopatch/{date_tag}"
+
+        subprocess.check_call(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+
+        changed = False
+        module_name = target_repo.split("/")[-1]
+
+        changed |= ensure_file(
+            repo_dir,
+            ".github/workflows/scw_bridge_repo.yml",
+            "SCW_BRIDGE_REPO.yml",
+        )
+
+        changed |= ensure_file(
+            repo_dir,
+            "SECURITY.md",
+            "SECURITY.md",
+        )
+
+        changed |= ensure_file(
+            repo_dir,
+            "stegverse-module.json",
+            "stegverse-module.json",
+            replacements={"{{MODULE_NAME}}": module_name},
+        )
+
+        if not changed:
+            log("No changes needed. Autopatch PASS (no-op).")
+            return
+
+        log("Committing changes...")
+        subprocess.check_call(["git", "add", "."], cwd=repo_dir)
+        subprocess.check_call(["git", "commit", "-m", "chore(autopatch): add missing StegVerse standard files"], cwd=repo_dir)
+
+        log("Pushing branch...")
+        subprocess.check_call(["git", "push", "origin", branch_name], cwd=repo_dir)
+
+        log("Opening PR...")
+        pr_url = gh(
+            "pr", "create",
+            "--repo", target_repo,
+            "--base", default_branch,
+            "--head", branch_name,
+            "--title", "Autopatch: add missing StegVerse standard files",
+            "--body", "SCW Autopatch Guardian added missing standard files (bridge workflow, SECURITY.md, module manifest)."
+        )
+
+        log(f"PR created: {pr_url}")
+        log("Autopatch PASS.")
 
 def cmd_sync_templates(target_repo=None):
-    log("Sync-templates (stub). We'll wire templates next.")
     log("Sync-templates stub PASS.")
 
 def cmd_standardize_readme(target_repo):
-    log(f"Standardize README for {target_repo} (stub).")
     log("Standardize README stub PASS.")
 
 def main():
