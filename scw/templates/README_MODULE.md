@@ -1,13 +1,15 @@
 # {{MODULE_NAME}}
 
-> StegVerse module.
+> StegVerse Module (auto-managed by SCW)
 
 ## Purpose
 Describe what this module does.
 
 ## Status
-- Version: {{VERSION}}
-- Owner org: StegVerse-Labs
+- Managed by SCW: ✅
+- Guardians: autopatch (pilot)
 
-## Automation
-This repository is managed by StegVerse SCW.
+## Commands
+Open an issue/comment and use:
+- `/scw self-test`
+- `/scw autopatch`
