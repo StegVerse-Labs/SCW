@@ -1,0 +1,39 @@
+name: StegVerse SCW Bridge (Repo)
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+      SCW_REPO: StegVerse-Labs/SCW
+
+    steps:
+      - name: Parse /scw command
+        id: parse
+        run: |
+          TEXT="${{ github.event.issue.body || github.event.comment.body }}"
+          CMD=$(echo "$TEXT" | sed -n 's/^\/scw[ ]\+\([^ ]\+\).*$/\1/p' | head -n1)
+          ARGS=$(echo "$TEXT" | sed -n 's/^\/scw[ ]\+[^ ]\+[ ]\+\(.*\)$/\1/p' | head -n1)
+          echo "cmd=$CMD" >> $GITHUB_OUTPUT
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+
+      - name: Dispatch to SCW
+        if: steps.parse.outputs.cmd != ''
+        run: |
+          payload=$(jq -n \
+            --arg cmd "${{ steps.parse.outputs.cmd }}" \
+            --arg args "${{ steps.parse.outputs.args }}" \
+            '{command:$cmd,args_text:$args,source:{repo:"'${{ github.repository }}'",issue_number:"'${{ github.event.issue.number || github.event.comment.issue_url }}'"}}')
+          gh api repos/$SCW_REPO/dispatches \
+            -f event_type='scw-command' \
+            -f client_payload="$payload"
