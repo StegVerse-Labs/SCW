@@ -1,0 +1,9 @@
+{
+  "module": "{{MODULE_NAME}}",
+  "org": "StegVerse-Labs",
+  "status": "active",
+  "automation": {
+    "scw_managed": true,
+    "guardians": ["autopatch"]
+  }
+}
