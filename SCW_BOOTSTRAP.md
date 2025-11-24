@@ -1,6 +1,1 @@
-# SCW Bootstrap
-
-SCW will eventually create or standardize repos from templates.
-For now, Bootstrap is a placeholder.
-
-Use SCW Orchestrator with `sync-templates` to validate your setup.
+Secrets required: GH_STEGVERSE_AI_TOKEN (FGPAT R/W on StegVerse-Labs all repos)

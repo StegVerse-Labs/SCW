@@ -1,23 +1,30 @@
-# StegVerse SCW (StegVerse Code Worker)
+StegVerse — Sovereign Control Workspace (SCW)
+====================================================
 
-SCW is the StegVerse root orchestrator. It receives commands (via workflow_dispatch or /scw issue comments),
-runs validations, and will progressively host Guardians (Autopatch, Readme, Governance, Continuity, Deploy).
+Root orchestrator for the StegVerse-Labs org.
 
-## Workflows
+Included
+--------
+- `.github/workflows/scw_orchestrator.yml`
+- `.github/workflows/scw_bridge.yml`
+- `scw/scw_core.py`
+- `scw/guardian_manifest.json`
+- `scw/templates/*`
+- `scripts/*`
 
-- **SCW Orchestrator**: `.github/workflows/scw_orchestrator.yml`
-  - Run from Actions tab.
-  - Commands: `self-test`, `autopatch`, `sync-templates`, `standardize-readme`.
+Quick start
+-----------
+1) Org secret:
+   - GH_STEGVERSE_AI_TOKEN = fine-grained PAT with R/W on StegVerse-Labs (all repos)
 
-- **SCW Bridge**: `.github/workflows/scw_bridge.yml`
-  - Listen for `/scw <command> [json]` in issues/comments in any repo.
+2) Self-test:
+   Actions → SCW Orchestrator → Run workflow  
+   command=self-test, target_repo=StegVerse-Labs/TVC
 
-## Setup
+3) Autopatch pilot:
+   command=autopatch, target_repo=StegVerse-Labs/TVC
 
-1. Ensure org secret `GH_STEGVERSE_AI_TOKEN` exists in **StegVerse-Labs**.
-2. Ensure repos are public or org plan allows org secrets for private repos.
-3. Run **SCW Orchestrator → self-test**.
-
-## Roadmap
-
-Phase 2 will add real template syncing and autopatch PR generation.
+Design notes
+------------
+- Orchestrator sets git identity so commits succeed.
+- Autopatch rewrites origin remote to include PAT so push succeeds.
