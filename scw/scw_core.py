@@ -1,4 +1,4 @@
-import os, json, subprocess, tempfile, shutil, pathlib, datetime
+import os, json, subprocess, tempfile, pathlib, datetime
 
 ORG = os.getenv("ORG_GITHUB", "StegVerse-Labs")
 
@@ -47,6 +47,11 @@ def cmd_self_test(target_repo=None):
 def cmd_autopatch(target_repo):
     log(f"Autopatch starting for {target_repo}...")
 
+    # GH token from workflow env
+    token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise SystemExit("No GH_TOKEN/GITHUB_TOKEN available to autopatch.")
+
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
         repo_dir = td / "repo"
@@ -59,6 +64,10 @@ def cmd_autopatch(target_repo):
         branch_name = f"autopatch/{date_tag}"
 
         subprocess.check_call(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+
+        # ✅ Fix: make origin use token auth for push
+        authed_origin = f"https://x-access-token:{token}@github.com/{target_repo}.git"
+        subprocess.check_call(["git", "remote", "set-url", "origin", authed_origin], cwd=repo_dir)
 
         changed = False
         module_name = target_repo.split("/")[-1]
@@ -88,7 +97,10 @@ def cmd_autopatch(target_repo):
 
         log("Committing changes...")
         subprocess.check_call(["git", "add", "."], cwd=repo_dir)
-        subprocess.check_call(["git", "commit", "-m", "chore(autopatch): add missing StegVerse standard files"], cwd=repo_dir)
+        subprocess.check_call(
+            ["git", "commit", "-m", "chore(autopatch): add missing StegVerse standard files"],
+            cwd=repo_dir
+        )
 
         log("Pushing branch...")
         subprocess.check_call(["git", "push", "origin", branch_name], cwd=repo_dir)
