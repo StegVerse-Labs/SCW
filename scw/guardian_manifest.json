@@ -1,0 +1,32 @@
+{
+  "version": "0.1.0",
+  "org": "StegVerse-Labs",
+  "guardians": [
+    {
+      "name": "autopatch",
+      "description": "Applies safe template and workflow fixes",
+      "enabled": false
+    },
+    {
+      "name": "readme",
+      "description": "Standardizes READMEs and badges",
+      "enabled": false
+    },
+    {
+      "name": "governance",
+      "description": "Enforces naming/structure conventions",
+      "enabled": false
+    },
+    {
+      "name": "continuity",
+      "description": "Ingests conversation logs",
+      "enabled": false
+    },
+    {
+      "name": "deploy",
+      "description": "Validates/retiggers deploy hooks",
+      "enabled": false
+    }
+  ],
+  "templates_path": "scw/templates"
+}
