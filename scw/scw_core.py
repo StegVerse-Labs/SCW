@@ -51,6 +51,8 @@ def cmd_autopatch(target_repo):
     if not token:
         raise SystemExit("No GH_TOKEN/GITHUB_TOKEN available to autopatch.")
 
+    authed_push_url = f"https://x-access-token:{token}@github.com/{target_repo}.git"
+
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
         repo_dir = td / "repo"
@@ -63,10 +65,6 @@ def cmd_autopatch(target_repo):
         branch_name = f"autopatch/{date_tag}"
 
         subprocess.check_call(["git", "checkout", "-b", branch_name], cwd=repo_dir)
-
-        # Ensure pushes authenticate with the PAT
-        authed_origin = f"https://x-access-token:{token}@github.com/{target_repo}.git"
-        subprocess.check_call(["git", "remote", "set-url", "origin", authed_origin], cwd=repo_dir)
 
         changed = False
         module_name = target_repo.split("/")[-1]
@@ -87,8 +85,8 @@ def cmd_autopatch(target_repo):
         subprocess.check_call(["git", "commit", "-m",
                                "chore(autopatch): add missing StegVerse standard files"], cwd=repo_dir)
 
-        log("Pushing branch...")
-        subprocess.check_call(["git", "push", "origin", branch_name], cwd=repo_dir)
+        log("Pushing branch with PAT-auth URL...")
+        subprocess.check_call(["git", "push", authed_push_url, branch_name], cwd=repo_dir)
 
         log("Opening PR...")
         pr_url = gh("pr", "create", "--repo", target_repo, "--base", default_branch, "--head", branch_name,

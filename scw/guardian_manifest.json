@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.1",
   "guardians": {
     "autopatch": {
       "description": "Add missing StegVerse standard files and bridge workflow; open PR.",
