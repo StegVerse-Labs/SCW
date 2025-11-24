@@ -47,7 +47,6 @@ def cmd_self_test(target_repo=None):
 def cmd_autopatch(target_repo):
     log(f"Autopatch starting for {target_repo}...")
 
-    # GH token from workflow env
     token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
     if not token:
         raise SystemExit("No GH_TOKEN/GITHUB_TOKEN available to autopatch.")
@@ -65,31 +64,19 @@ def cmd_autopatch(target_repo):
 
         subprocess.check_call(["git", "checkout", "-b", branch_name], cwd=repo_dir)
 
-        # ✅ Fix: make origin use token auth for push
+        # Ensure pushes authenticate with the PAT
         authed_origin = f"https://x-access-token:{token}@github.com/{target_repo}.git"
         subprocess.check_call(["git", "remote", "set-url", "origin", authed_origin], cwd=repo_dir)
 
         changed = False
         module_name = target_repo.split("/")[-1]
 
-        changed |= ensure_file(
-            repo_dir,
-            ".github/workflows/scw_bridge_repo.yml",
-            "SCW_BRIDGE_REPO.yml",
-        )
-
-        changed |= ensure_file(
-            repo_dir,
-            "SECURITY.md",
-            "SECURITY.md",
-        )
-
-        changed |= ensure_file(
-            repo_dir,
-            "stegverse-module.json",
-            "stegverse-module.json",
-            replacements={"{{MODULE_NAME}}": module_name},
-        )
+        changed |= ensure_file(repo_dir, ".github/workflows/scw_bridge_repo.yml", "SCW_BRIDGE_REPO.yml")
+        changed |= ensure_file(repo_dir, "SECURITY.md", "SECURITY.md")
+        changed |= ensure_file(repo_dir, "stegverse-module.json", "stegverse-module.json",
+                               replacements={"{{MODULE_NAME}}": module_name})
+        changed |= ensure_file(repo_dir, "README.md", "README_MODULE.md",
+                               replacements={"{{MODULE_NAME}}": module_name})
 
         if not changed:
             log("No changes needed. Autopatch PASS (no-op).")
@@ -97,32 +84,25 @@ def cmd_autopatch(target_repo):
 
         log("Committing changes...")
         subprocess.check_call(["git", "add", "."], cwd=repo_dir)
-        subprocess.check_call(
-            ["git", "commit", "-m", "chore(autopatch): add missing StegVerse standard files"],
-            cwd=repo_dir
-        )
+        subprocess.check_call(["git", "commit", "-m",
+                               "chore(autopatch): add missing StegVerse standard files"], cwd=repo_dir)
 
         log("Pushing branch...")
         subprocess.check_call(["git", "push", "origin", branch_name], cwd=repo_dir)
 
         log("Opening PR...")
-        pr_url = gh(
-            "pr", "create",
-            "--repo", target_repo,
-            "--base", default_branch,
-            "--head", branch_name,
-            "--title", "Autopatch: add missing StegVerse standard files",
-            "--body", "SCW Autopatch Guardian added missing standard files (bridge workflow, SECURITY.md, module manifest)."
-        )
+        pr_url = gh("pr", "create", "--repo", target_repo, "--base", default_branch, "--head", branch_name,
+                    "--title", "Autopatch: add missing StegVerse standard files",
+                    "--body", "SCW Autopatch Guardian added missing standard files (bridge workflow, SECURITY.md, module manifest, README skeleton).")
 
         log(f"PR created: {pr_url}")
         log("Autopatch PASS.")
 
 def cmd_sync_templates(target_repo=None):
-    log("Sync-templates stub PASS.")
+    log("sync-templates not implemented yet (stub PASS).")
 
 def cmd_standardize_readme(target_repo):
-    log("Standardize README stub PASS.")
+    log("standardize-readme not implemented yet (stub PASS).")
 
 def main():
     event = os.getenv("SCW_EVENT_NAME", "")
@@ -158,7 +138,7 @@ def main():
 
     if cmd in ("self-test", "selftest"):
         cmd_self_test(target_repo)
-    elif cmd in ("autopatch",):
+    elif cmd == "autopatch":
         if not target_repo:
             raise SystemExit("autopatch requires target_repo")
         cmd_autopatch(target_repo)
