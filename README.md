@@ -7,7 +7,7 @@ Included
 --------
 - `.github/workflows/scw_orchestrator.yml`
 - `.github/workflows/scw_bridge.yml`
-- `scw/scw_core.py`
+- `scw/scw_core.py` (v2 PAT-auth push fix)
 - `scw/guardian_manifest.json`
 - `scw/templates/*`
 - `scripts/*`
@@ -18,7 +18,7 @@ Quick start
    - GH_STEGVERSE_AI_TOKEN = fine-grained PAT with R/W on StegVerse-Labs (all repos)
 
 2) Self-test:
-   Actions → SCW Orchestrator → Run workflow  
+   Actions → SCW Orchestrator → Run workflow
    command=self-test, target_repo=StegVerse-Labs/TVC
 
 3) Autopatch pilot:
@@ -27,4 +27,4 @@ Quick start
 Design notes
 ------------
 - Orchestrator sets git identity so commits succeed.
-- Autopatch rewrites origin remote to include PAT so push succeeds.
+- Autopatch pushes via explicit PAT-auth URL to prevent 403.
