@@ -1,0 +1,50 @@
+name: StegVerse SCW Bridge
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      instructions:
+        description: "Instructions to send to SCW"
+        required: true
+      target_repo:
+        description: "Optional full repo name (e.g. StegVerse-Labs/TVC)"
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+      ORG_GITHUB: StegVerse-Labs
+      SCW_REPO: StegVerse-Labs/SCW
+
+    steps:
+      - name: Parse instruction text
+        id: parse
+        run: |
+          TEXT="${{ github.event.inputs.instructions || github.event.issue.body || github.event.comment.body }}"
+          # Accept commands like: /scw self-test or /scw autopatch {"target_repo":"StegVerse-Labs/TVC"}
+          CMD=$(echo "$TEXT" | sed -n 's/^\/scw[ ]\+\([^ ]\+\).*$/\1/p' | head -n1)
+          ARGS=$(echo "$TEXT" | sed -n 's/^\/scw[ ]\+[^ ]\+[ ]\+\(.*\)$/\1/p' | head -n1)
+          echo "cmd=$CMD" >> $GITHUB_OUTPUT
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+
+      - name: Dispatch to SCW orchestrator
+        if: steps.parse.outputs.cmd != ''
+        run: |
+          payload=$(jq -n \
+            --arg cmd "${{ steps.parse.outputs.cmd }}" \
+            --arg target "${{ github.event.inputs.target_repo }}" \
+            --arg args "${{ steps.parse.outputs.args }}" \
+            '{command:$cmd,target_repo:($target|select(.!="")),args_text:$args,source:{repo:"'${{ github.repository }}'",issue_number:"'${{ github.event.issue.number || github.event.issue.pull_request.number || github.event.issue.number }}'"}}')
+          gh api repos/$SCW_REPO/dispatches \
+            -f event_type='scw-command' \
+            -f client_payload="$payload"
