@@ -1,114 +1,136 @@
 name: StegVerse SCW Orchestrator
 
 on:
+  # This enables the "Run workflow" button
   workflow_dispatch:
     inputs:
       command:
-        description: "SCW command to run (self-test, autopatch)"
+        description: "SCW command to run"
         required: true
         default: "self-test"
+        type: choice
+        options:
+          - self-test
+          - autopatch
       target_repo:
-        description: "Full repo name to operate on (e.g. StegVerse-Labs/TVC)"
+        description: "Target repo in ORG/REPO form (ex: StegVerse-Labs/TVC)"
         required: true
+        default: "StegVerse-Labs/SCW"
       org:
-        description: "Owning org of the target repo (StegVerse or StegVerse-Labs)"
-        required: true
+        description: "Owning org for the target repo"
+        required: false
         default: "StegVerse-Labs"
       base_branch:
-        description: "Base branch for autopatch (default: main)"
+        description: "Base branch for autopatch"
         required: false
         default: "main"
       dry_run:
-        description: "Run without pushing changes (true/false)"
+        description: "If true, do not push PRs/branches"
         required: false
-        default: "false"
-      allowlist:
-        description: "Optional comma-separated repo allowlist"
-        required: false
+        type: boolean
+        default: false
+
+  # Optional: keeps your repo_dispatch path working
+  repository_dispatch:
+    types: [scw]
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
-  SCW:
+  scw:
     runs-on: ubuntu-latest
+
+    env:
+      # Resolve inputs from workflow_dispatch OR repository_dispatch OR defaults
+      ORG_GITHUB: ${{ inputs.org || github.event.client_payload.org || 'StegVerse-Labs' }}
+      TARGET_REPO: ${{ inputs.target_repo || github.event.client_payload.target_repo || github.repository }}
+      UI_CMD: ${{ inputs.command || github.event.client_payload.command || 'self-test' }}
+      BASE_BRANCH: ${{ inputs.base_branch || github.event.client_payload.base_branch || 'main' }}
+      DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
 
     steps:
       - name: Checkout SCW repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Map GH token and validate presence (required for SCW)
-        id: map_token
+      - name: Map GH token and validate presence (required)
+        id: tok
+        shell: bash
         run: |
-          echo "Resolving GH token for org: ${{ github.event.inputs.org }}"
+          echo "Resolving GH token for org: $ORG_GITHUB"
+          TOKEN=""
 
-          if [ "${{ github.event.inputs.org }}" = "StegVerse-Labs" ]; then
-            echo "Using Labs token"
-            echo "GH_TOKEN=${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN }}" >> $GITHUB_ENV
+          if [[ "$ORG_GITHUB" == "StegVerse-Labs" ]]; then
+            echo "Using Labs token preference"
+            TOKEN='${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN }}'
+            if [[ -z "$TOKEN" ]]; then
+              echo "Labs token empty, falling back to GH_STEGVERSE_AI_TOKEN"
+              TOKEN='${{ secrets.GH_STEGVERSE_AI_TOKEN }}'
+            fi
           else
-            echo "Using StegVerse token"
-            echo "GH_TOKEN=${{ secrets.GH_STEGVERSE_AI_TOKEN }}" >> $GITHUB_ENV
+            echo "Using main org token preference"
+            TOKEN='${{ secrets.GH_STEGVERSE_AI_TOKEN }}'
+            if [[ -z "$TOKEN" ]]; then
+              echo "Main token empty, falling back to GH_STEGVERSE_LABS_AI_TOKEN"
+              TOKEN='${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN }}'
+            fi
           fi
 
-          if [ -z "${{ env.GH_TOKEN }}" ]; then
-            echo "::error title=Missing Token::No GitHub token available. Check org and secrets."
+          if [[ -z "$TOKEN" ]]; then
+            echo "ERROR: No GitHub token available. Check org/repo secrets."
             exit 1
           fi
 
-      - name: Resolve inputs (supports workflow_dispatch)
-        id: resolve_inputs
-        run: |
-          CMD="${{ github.event.inputs.command }}"
-          TARGET="${{ github.event.inputs.target_repo }}"
-          ORG="${{ github.event.inputs.org }}"
-          BASE="${{ github.event.inputs.base_branch }}"
-          DRY="${{ github.event.inputs.dry_run }}"
-          ALLOW="${{ github.event.inputs.allowlist }}"
+          echo "::add-mask::$TOKEN"
+          echo "GH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "GH_TOKEN present ✅"
 
-          echo "command: $CMD"
-          echo "target_repo: $TARGET"
-          echo "org: $ORG"
-          echo "base_branch: $BASE"
-          echo "dry_run: $DRY"
-          echo "allowlist: $ALLOW"
-
-          echo "CMD=$CMD" >> $GITHUB_ENV
-          echo "TARGET=$TARGET" >> $GITHUB_ENV
-          echo "ORG=$ORG" >> $GITHUB_ENV
-          echo "BASE=$BASE" >> $GITHUB_ENV
-          echo "DRY=$DRY" >> $GITHUB_ENV
-          echo "ALLOW=$ALLOW" >> $GITHUB_ENV
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Set git identity (required for autopatch commits)
         run: |
           git config --global user.name "StegVerse-AI"
-          git config --global user.email "ai@stegverse.local"
+          git config --global user.email "stegverse-ai@users.noreply.github.com"
 
       - name: Install dependencies (safe if requirements missing)
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           if [ -f scw/requirements.txt ]; then
-            python -m pip install -r scw/requirements.txt
+            pip install -r scw/requirements.txt
           else
-            echo "No requirements.txt found — continuing"
+            pip install requests PyYAML
           fi
 
       - name: Run SCW core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.GH_TOKEN }}
         run: |
           echo "Running SCW core..."
-          python scw/scw_core.py \
-            --command "${CMD}" \
-            --target "${TARGET}" \
-            --org "${ORG}" \
-            --base "${BASE}" \
-            --dry "${DRY}" \
-            --allow "${ALLOW}"
+          ARGS=()
+          if [[ "$DRY_RUN" == "true" ]]; then
+            ARGS+=("--dry-run")
+          fi
+
+          python scw/scw_core.py "$UI_CMD" \
+            --target-repo "$TARGET_REPO" \
+            --org "$ORG_GITHUB" \
+            --base-branch "$BASE_BRANCH" \
+            "${ARGS[@]}"
 
       - name: Post-run summary
         if: always()
         run: |
           echo "SCW finished with status: ${{ job.status }}"
-          echo "Command: $CMD"
-          echo "Target repo: $TARGET"
-          echo "Dry run: $DRY"
+          echo "Command: $UI_CMD"
+          echo "Target repo: $TARGET_REPO"
+          echo "Org: $ORG_GITHUB"
+          echo "Dry run: $DRY_RUN"
