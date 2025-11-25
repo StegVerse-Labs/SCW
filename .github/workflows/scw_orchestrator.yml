@@ -3,41 +3,130 @@ name: StegVerse SCW Orchestrator
 on:
   workflow_dispatch:
     inputs:
-      target_repo:
-        description: "Repo to autopatch (e.g. StegVerse-Labs/TVC)"
-        required: true
       command:
-        description: "SCW command: self-test or autopatch"
+        description: "SCW command to run"
         required: true
         default: "self-test"
+        type: choice
+        options:
+          - self-test
+          - autopatch
+      target_repo:
+        description: "Full repo name (e.g., StegVerse-Labs/TVC)"
+        required: true
+        default: "StegVerse-Labs/SCW"
+      org:
+        description: "GitHub org (optional override)"
+        required: false
+        default: "StegVerse-Labs"
+      dry_run:
+        description: "If true, SCW will not push changes (safety)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+  repository_dispatch:
+    types: [scw-run]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
   scw:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Set up job
-        run: echo "Starting SCW job..."
-
       - name: Checkout SCW repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- SAFETY PRE-FLIGHT ---
+      - name: Map GH token and validate presence (required)
+        env:
+          GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::No GitHub token found. Ensure org/repo secret GH_STEGVERSE_AI_TOKEN exists and is mapped to env GH_TOKEN."
+            exit 1
+          fi
+          echo "GH_TOKEN present ✅"
+
+      - name: Resolve inputs (supports workflow_dispatch + repository_dispatch)
+        id: inputs
+        env:
+          DISPATCH_CMD: ${{ github.event.client_payload.command }}
+          DISPATCH_REPO: ${{ github.event.client_payload.target_repo }}
+          DISPATCH_ORG: ${{ github.event.client_payload.org }}
+          DISPATCH_DRY: ${{ github.event.client_payload.dry_run }}
+          UI_CMD: ${{ github.event.inputs.command }}
+          UI_REPO: ${{ github.event.inputs.target_repo }}
+          UI_ORG: ${{ github.event.inputs.org }}
+          UI_DRY: ${{ github.event.inputs.dry_run }}
+        run: |
+          CMD="${UI_CMD:-$DISPATCH_CMD}"
+          REPO="${UI_REPO:-$DISPATCH_REPO}"
+          ORG="${UI_ORG:-$DISPATCH_ORG}"
+          DRY="${UI_DRY:-$DISPATCH_DRY}"
+
+          if [ -z "$CMD" ]; then CMD="self-test"; fi
+          if [ -z "$REPO" ]; then
+            echo "::error::target_repo is required (e.g., StegVerse-Labs/TVC)"
+            exit 1
+          fi
+          if [ -z "$ORG" ]; then ORG="StegVerse-Labs"; fi
+          if [ -z "$DRY" ]; then DRY="false"; fi
+
+          echo "command=$CMD" >> $GITHUB_OUTPUT
+          echo "target_repo=$REPO" >> $GITHUB_OUTPUT
+          echo "org=$ORG" >> $GITHUB_OUTPUT
+          echo "dry_run=$DRY" >> $GITHUB_OUTPUT
+
+          echo "Resolved inputs:"
+          echo "  command: $CMD"
+          echo "  target_repo: $REPO"
+          echo "  org: $ORG"
+          echo "  dry_run: $DRY"
 
       - name: Set git identity (required for autopatch commits)
         run: |
-          git config --global user.email "scw-bot@stegverse.ai"
           git config --global user.name "StegVerse-AI"
+          git config --global user.email "stegverse-ai@users.noreply.github.com"
 
-      - name: Install dependencies
-        run: pip install -r scw/requirements.txt
+      - name: Install dependencies (safe if requirements missing)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "scw/requirements.txt" ]; then
+            pip install -r scw/requirements.txt
+          elif [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found; continuing without pip installs."
+          fi
 
+      # --- RUN SCW CORE ---
       - name: Run SCW core
+        env:
+          GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+          SCW_DRY_RUN: ${{ steps.inputs.outputs.dry_run }}
         run: |
           echo "Running SCW core..."
           python scw/scw_core.py \
-            "${{ github.event.inputs.command }}" \
-            --target-repo "${{ github.event.inputs.target_repo }}" \
-            --org "StegVerse-Labs"
+            --command "${{ steps.inputs.outputs.command }}" \
+            --target-repo "${{ steps.inputs.outputs.target_repo }}" \
+            --org "${{ steps.inputs.outputs.org }}" \
+            $( [ "${{ steps.inputs.outputs.dry_run }}" = "true" ] && echo "--dry-run" )
 
-      - name: Post Checkout SCW repo
+      # --- POST SUMMARY ---
+      - name: Post-run summary
         if: always()
-        run: echo "SCW job finished."
+        run: |
+          echo "SCW finished with status: ${{ job.status }}"
+          echo "Command: ${{ steps.inputs.outputs.command }}"
+          echo "Target repo: ${{ steps.inputs.outputs.target_repo }}"
+          echo "Dry run: ${{ steps.inputs.outputs.dry_run }}"
