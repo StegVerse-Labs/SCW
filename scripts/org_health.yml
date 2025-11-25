@@ -1,0 +1,47 @@
+name: Org Health Scan (SCW)
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Org to scan"
+        required: true
+        default: "StegVerse-Labs"
+      target_repo:
+        description: "Optional single repo to scan"
+        required: false
+        default: ""
+      dry_run:
+        description: "If true, do not push or open PRs"
+        type: boolean
+        required: false
+        default: true
+
+  schedule:
+    - cron: "0 14 * * *"  # daily 14:00 UTC (9am CT)
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f scw/requirements.txt ]; then pip install -r scw/requirements.txt; fi
+      - name: Run org scan
+        env:
+          GH_TOKEN: ${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN || secrets.GH_STEGVERSE_AI_TOKEN }}
+        run: |
+          python -m scw.scw_core \
+            --org "${{ inputs.org }}" \
+            --target-repo "${{ inputs.target_repo }}" \
+            --dry-run "${{ inputs.dry_run }}" \
+            org-scan
