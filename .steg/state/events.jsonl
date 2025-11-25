@@ -1,0 +1,21 @@
+{
+  "ts": "2025-10-17T15:32:12Z",
+  "namespace": "SCW",
+  "kind": "workflow_first_aid",
+  "event_type": "repair",
+  "status": "fixed",
+  "resource_type": "workflow",
+  "resource_name": "autopatch-ops.yml",
+  "path": ".github/workflows/autopatch-ops.yml",
+  "post_checksum": "…sha256…",
+  "labels": ["first_aid", "repair", "dispatch_injected"],
+  "meta": {
+    "repo": "StegVerse/StegVerse-SCW",
+    "workflow": "Workflows First-Aid Sweep",
+    "run_id": "...",
+    "job": "sweep",
+    "actor": "RigelRandolph",
+    "ref_name": "main",
+    "sha": "..."
+  }
+}
