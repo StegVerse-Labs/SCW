@@ -1,0 +1,61 @@
+name: Workflows State Snapshot (StegVerse State Engine)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".steg/state/**"
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate state snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/state_reader.py snapshot \
+            --events-path ".steg/state/events.jsonl" \
+            --output ".github/docs/STATE_SNAPSHOT.md"
+
+      - name: Commit snapshot (if changed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add .github/docs/STATE_SNAPSHOT.md || true
+          if ! git diff --cached --quiet; then
+            git config user.name  "StegVerse Bot"
+            git config user.email "bot@stegverse.org"
+            git commit -m "docs(state): refresh StegVerse State Snapshot"
+            git push origin HEAD:main
+          else
+            echo "No snapshot changes."
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## Workflows State Snapshot" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ".github/docs/STATE_SNAPSHOT.md" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat ".github/docs/STATE_SNAPSHOT.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_No STATE_SNAPSHOT.md generated (maybe no events yet?)._" >> "$GITHUB_STEP_SUMMARY"
+          fi
