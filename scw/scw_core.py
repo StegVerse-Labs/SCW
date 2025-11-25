@@ -1,148 +1,220 @@
 #!/usr/bin/env python3
-import argparse, os, subprocess, sys, json, datetime, re, shutil, pathlib
+"""
+StegVerse — Sovereign Control Workspace (SCW) core orchestrator.
 
-ORG_DEFAULT = os.getenv("ORG_GITHUB", "StegVerse-Labs")
-TOKEN_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_STEGVERSE_AI_TOKEN"]
+v2 fixes:
+- requirements.txt exists at scw/requirements.txt
+- CLI supports env fallbacks so workflows don't hard-fail on missing inputs
+- clearer error messages around GH_TOKEN
+"""
 
-STANDARD_FILES = [
-    "SECURITY.md",
-    ".github/workflows/scw_bridge_repo.yml",
-    "stegverse-module.json",
-]
+from __future__ import annotations
+import argparse, os, subprocess, sys, json, datetime, pathlib, textwrap
+from typing import Optional, Tuple
 
-def die(msg, code=1):
-    print(f"[SCW] ERROR: {msg}", file=sys.stderr)
-    sys.exit(code)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-def sh(cmd, cwd=None, capture=False):
-    if capture:
-        return subprocess.check_output(cmd, cwd=cwd, text=True).strip()
-    print(f"[SCW] $ {' '.join(cmd)}")
-    subprocess.check_call(cmd, cwd=cwd)
+def eprint(*a):
+    print(*a, file=sys.stderr)
 
-def get_token():
-    for k in TOKEN_ENV_KEYS:
-        v = os.getenv(k)
-        if v and v.strip():
-            return v.strip()
-    die("No GitHub token found. Ensure org secret GH_STEGVERSE_AI_TOKEN is set and workflow passes env GH_TOKEN.")
+def get_env(name: str, default: Optional[str]=None) -> Optional[str]:
+    v = os.getenv(name)
+    return v if v not in (None, "") else default
 
-def gh_api_json(args):
-    token = get_token()
-    env = os.environ.copy()
-    env["GH_TOKEN"] = token
-    out = subprocess.check_output(["gh"] + args, text=True, env=env).strip()
-    return json.loads(out) if out else {}
+def gh_token() -> Optional[str]:
+    """Return a GitHub token from common env names.
 
-def list_org_repos(org):
-    data = gh_api_json(["repo", "list", org, "--limit", "200", "--json", "name,owner,isPrivate,defaultBranchRef"])
-    return data or []
+    Priority:
+      1) GH_TOKEN (preferred)
+      2) GH_STEGVERSE_AI_TOKEN / GH_STEGVERSE_PAT / PAT_WORKFLOW_FG / PAT_WORKFLOW (legacy SCW names)
+      3) GITHUB_TOKEN (GitHub Actions default)
+    """
+    for name in [
+        "GH_TOKEN",
+        "GH_STEGVERSE_AI_TOKEN",
+        "GH_STEGVERSE_PAT",
+        "PAT_WORKFLOW_FG",
+        "PAT_WORKFLOW",
+        "GITHUB_TOKEN",
+    ]:
+        tok = get_env(name)
+        if tok:
+            return tok
+    return None
 
-def ensure_git_identity():
-    name = os.getenv("GIT_AUTHOR_NAME", "StegVerse-AI")
-    email = os.getenv("GIT_AUTHOR_EMAIL", "stegverse-ai@users.noreply.github.com")
-    sh(["git", "config", "--global", "user.name", name])
-    sh(["git", "config", "--global", "user.email", email])
+def run(cmd, cwd=None, check=True):
+    return subprocess.run(cmd, cwd=cwd, check=check, text=True, capture_output=False)
 
-def clone_repo(full_name, workdir):
-    token = get_token()
-    url = f"https://x-access-token:{token}@github.com/{full_name}.git"
-    if workdir.exists():
-        shutil.rmtree(workdir)
-    sh(["git", "clone", "--depth", "1", url, str(workdir)])
-
-def current_default_branch(repo_dir):
+def gh_can_access(token: str, org: str) -> Tuple[bool, str]:
+    """Lightweight check by calling `gh api` if available, else skip."""
     try:
-        head = sh(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo_dir, capture=True)
-        return head.split("/")[-1]
-    except Exception:
-        return "main"
+        r = subprocess.run(
+            ["gh", "api", "user", "-H", f"Authorization: token {token}"],
+            text=True, capture_output=True, check=False
+        )
+        if r.returncode == 0:
+            login = json.loads(r.stdout or "{}").get("login", "")
+            return True, login
+        return False, (r.stderr or "").strip()
+    except FileNotFoundError:
+        return True, "gh-not-installed"
 
-def make_branch_name(prefix="autopatch"):
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    return f"{prefix}/{ts}"
-
-def add_standard_files(repo_dir):
-    templates_dir = pathlib.Path(__file__).resolve().parent.parent / "templates"
-    changed = False
-    for rel in STANDARD_FILES:
-        src = templates_dir / rel
-        dst = repo_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if not dst.exists():
-            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-            changed = True
-    return changed
-
-def push_with_pat(repo_dir, branch):
-    token = get_token()
-    origin = sh(["git", "config", "--get", "remote.origin.url"], cwd=repo_dir, capture=True)
-    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", origin)
-    if not m:
-        die("Cannot parse origin URL to build PAT-auth push URL.")
-    repo_full = m.group(1)
-    authed_url = f"https://x-access-token:{token}@github.com/{repo_full}.git"
-    sh(["git", "push", authed_url, branch], cwd=repo_dir)
-
-def open_pr(full_name, head_branch, base_branch, title, body):
-    token = get_token()
-    env = os.environ.copy()
-    env["GH_TOKEN"] = token
-    try:
-        url = subprocess.check_output(
-            ["gh","pr","create","--repo",full_name,"--head",head_branch,"--base",base_branch,
-             "--title",title,"--body",body],
-            text=True, env=env
-        ).strip()
-        print(f"[SCW] PR created: {url}")
-        return url
-    except subprocess.CalledProcessError:
-        die("PR creation failed. Token may lack Pull Requests write permission or a repo-level secret override is still present.")
-
-def cmd_self_test(target_repo, org):
-    print("[SCW] Command: self-test")
+def cmd_self_test(org: str, target_repo: str):
+    print(f"[SCW] Command: self-test")
     print(f"[SCW] Target repo: {target_repo}")
-    repos = list_org_repos(org)
-    print(f"[SCW] Token can see {len(repos)} repos in {org}.")
-    samples = ", ".join([f"{r['owner']['login']}/{r['name']}" for r in repos[:10]])
-    print(f"[SCW] Sample repos: {samples}")
-    gh_api_json(["repo","view",target_repo,"--json","name,defaultBranchRef"])
+    tok = gh_token()
+    if not tok:
+        eprint("[SCW] ERROR: No GitHub token found.")
+        eprint("[SCW] Ensure org/repo secret GH_STEGVERSE_AI_TOKEN exists and workflow maps it to env GH_TOKEN.")
+        sys.exit(1)
+
+    ok, who = gh_can_access(tok, org)
+    if ok:
+        print(f"[SCW] Token check OK. Auth login: {who}")
+    else:
+        eprint(f"[SCW] WARNING: token check failed: {who}")
+
+    # best-effort list repos visible to token
+    try:
+        r = subprocess.run(
+            ["gh", "repo", "list", org, "--limit", "50", "--json", "nameWithOwner"],
+            text=True, capture_output=True, check=False,
+            env={**os.environ, "GH_TOKEN": tok}
+        )
+        if r.returncode == 0:
+            data = json.loads(r.stdout or "[]")
+            print(f"[SCW] Token can see {len(data)} repos in {org}.")
+            if data:
+                samples = ", ".join([d["nameWithOwner"] for d in data[:10]])
+                print(f"[SCW] Sample repos: {samples}")
+        else:
+            print(f"[SCW] Repo list skipped: gh returned {r.returncode}")
+    except FileNotFoundError:
+        print("[SCW] gh CLI not installed in runner; skipping repo list.")
+
     print("[SCW] Self-test PASS.")
 
-def cmd_autopatch(target_repo, org):
-    print("[SCW] Command: autopatch")
-    workdir = pathlib.Path("/tmp/scw_target")
-    clone_repo(target_repo, workdir)
-    base_branch = current_default_branch(workdir)
-    print(f"[SCW] Target repo default branch: {base_branch}")
+def ensure_git_identity():
+    # GitHub Actions sometimes has empty ident; set safe defaults
+    name = get_env("GIT_AUTHOR_NAME", "StegVerse-AI")
+    email = get_env("GIT_AUTHOR_EMAIL", "stegverse-ai@users.noreply.github.com")
+    run(["git", "config", "--global", "user.name", name], check=False)
+    run(["git", "config", "--global", "user.email", email], check=False)
+
+def cmd_autopatch(org: str, target_repo: str, base_branch: str="main"):
+    # Safety preflight
+    tok = gh_token()
+    if not tok:
+        eprint("[SCW] ERROR: No GitHub token found. Set org secret GH_STEGVERSE_AI_TOKEN (or GH_TOKEN) and pass it as env GH_TOKEN.")
+        return 1
+    ok, who = gh_can_access(tok, org)
+    if not ok:
+        eprint(f"[SCW] ERROR: Token check failed: {who}")
+        return 1
+
+    """
+    Clone target repo, add standard files if missing, commit to a new branch,
+    push, and open a PR.
+    """
+    tok = gh_token()
+    if not tok:
+        eprint("[SCW] ERROR: No GitHub token found for autopatch.")
+        sys.exit(1)
 
     ensure_git_identity()
-    sh(["git","checkout","-b", make_branch_name()], cwd=workdir)
-    changed = add_standard_files(workdir)
+
+    work = pathlib.Path("/tmp/scw-autopatch")
+    if work.exists():
+        subprocess.run(["rm", "-rf", str(work)])
+    work.mkdir(parents=True, exist_ok=True)
+
+    url = f"https://github.com/{target_repo}.git"
+    print(f"[SCW] Cloning {url}")
+    run(["git", "clone", "--depth", "1", "--branch", base_branch, url, str(work)])
+
+    # Example standard files
+    std_files = {
+        "SECURITY.md": textwrap.dedent("""\
+            # Security Policy
+            Please report security issues privately to the StegVerse maintainers.
+            """),
+        "stegverse-module.json": json.dumps({
+            "name": target_repo.split("/")[-1],
+            "org": org,
+            "managedBy": "SCW",
+            "version": "0.0.0",
+        }, indent=2) + "\n",
+    }
+
+    changed = False
+    for rel, content in std_files.items():
+        p = work / rel
+        if not p.exists():
+            p.write_text(content, encoding="utf-8")
+            changed = True
+
     if not changed:
-        print("[SCW] No missing standard files. Nothing to patch.")
+        print("[SCW] Nothing to patch; exiting cleanly.")
         return
 
-    sh(["git","add","."])
-    sh(["git","commit","-m","chore(autopatch): add missing StegVerse standard files"], cwd=workdir)
-    branch = sh(["git","rev-parse","--abbrev-ref","HEAD"], cwd=workdir, capture=True)
+    branch = f"autopatch/{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+    run(["git", "checkout", "-b", branch], cwd=work)
+    run(["git", "add", "."], cwd=work)
+    run(["git", "commit", "-m", "chore(autopatch): add missing StegVerse standard files"], cwd=work)
+
+    authed_push_url = f"https://x-access-token:{tok}@github.com/{target_repo}.git"
     print("[SCW] Pushing branch with PAT-auth URL...")
-    push_with_pat(workdir, branch)
-    open_pr(target_repo, branch, base_branch,
-            "chore(autopatch): add missing StegVerse standard files",
-            "Automated by SCW autopatch. Please review and merge.")
+    run(["git", "push", authed_push_url, branch], cwd=work)
+
+    # Open PR via gh if available
+    try:
+        pr = subprocess.run(
+            ["gh", "pr", "create", "--repo", target_repo, "--base", base_branch, "--head", branch,
+             "--title", "chore(autopatch): standard files", "--body", "SCW autopatch"],
+            text=True, capture_output=True, check=False,
+            env={**os.environ, "GH_TOKEN": tok}
+        )
+        if pr.returncode == 0:
+            print(pr.stdout.strip())
+        else:
+            print("[SCW] PR create skipped or failed; you can open manually.")
+            print(pr.stderr.strip())
+    except FileNotFoundError:
+        print("[SCW] gh CLI not installed; open PR manually.")
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="scw_core", description="StegVerse SCW core")
+    p.add_argument("command", nargs="?", choices=["self-test", "autopatch"],
+                   help="Command to run")
+    p.add_argument("--org", default=None, help="GitHub org name")
+    p.add_argument("--target-repo", default=None, help="Full repo name ORG/REPO")
+    p.add_argument("--base-branch", default="main", help="Default branch to target")
+
+    return p
 
 def main():
-    ap = argparse.ArgumentParser(prog="scw_core")
-    ap.add_argument("command", choices=["self-test","autopatch"])
-    ap.add_argument("--org", default=ORG_DEFAULT)
-    ap.add_argument("--target-repo", required=True, help="e.g. StegVerse-Labs/TVC")
-    args = ap.parse_args()
+    parser = build_parser()
+    args, _ = parser.parse_known_args()
 
-    if args.command == "self-test":
-        cmd_self_test(args.target_repo, args.org)
+    # v2 env fallbacks
+    cmd = args.command or get_env("SCW_COMMAND")
+    org = args.org or get_env("ORG_GITHUB") or get_env("SCW_ORG") or "StegVerse-Labs"
+    target_repo = args.target_repo or get_env("TARGET_REPO") or get_env("SCW_TARGET_REPO")
+
+    if not cmd or not target_repo:
+        eprint("[SCW] ERROR: command and --target-repo are required.")
+        eprint("Usage examples:")
+        eprint("  python scw/scw_core.py self-test --org StegVerse-Labs --target-repo StegVerse-Labs/TVC")
+        eprint("  python scw/scw_core.py autopatch --target-repo StegVerse-Labs/TVC")
+        sys.exit(2)
+
+    if cmd == "self-test":
+        cmd_self_test(org, target_repo)
+    elif cmd == "autopatch":
+        cmd_autopatch(org, target_repo, base_branch=args.base_branch)
     else:
-        cmd_autopatch(args.target_repo, args.org)
+        eprint(f"[SCW] Unknown command: {cmd}")
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()
