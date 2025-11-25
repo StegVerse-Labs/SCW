@@ -36,16 +36,28 @@ jobs:
       - name: Commit snapshot (if changed)
         shell: bash
         run: |
-          set -euo pipefail
-          git add .github/docs/STATE_SNAPSHOT.md || true
-          if ! git diff --cached --quiet; then
-            git config user.name  "StegVerse Bot"
-            git config user.email "bot@stegverse.org"
-            git commit -m "docs(state): refresh StegVerse State Snapshot"
-            git push origin HEAD:main
-          else
-            echo "No snapshot changes."
+          set -e
 
+          SNAP_FILE=".github/state/workflows_state.json"
+
+          # If snapshot file doesn’t exist or has no diff, nothing to do
+          if [ ! -f "$SNAP_FILE" ]; then
+            echo "No snapshot file found to commit."
+          else
+            git add "$SNAP_FILE" || true
+
+            if git diff --cached --quiet; then
+              echo "No snapshot changes to commit."
+            else
+              git config user.name  "StegVerse Bot"
+              git config user.email "bot@stegverse.org"
+              git commit -m "state: update workflows snapshot" || true
+              git push origin HEAD:main || true
+            fi
+          fi
+
+          echo "snapshot-commit-step-complete"
+          
       - name: Summary
         if: always()
         shell: bash
