@@ -1,9 +1,8 @@
 {
-  "module": "{{MODULE_NAME}}",
-  "org": "StegVerse-Labs",
-  "status": "active",
-  "automation": {
-    "scw_managed": true,
-    "guardians": ["autopatch"]
+  "stegverse": {
+    "module": "unknown",
+    "version": "0.0.0",
+    "owner_org": "StegVerse-Labs",
+    "status": "scaffold"
   }
 }
