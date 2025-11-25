@@ -1,0 +1,56 @@
+name: Workflow Newline Healer
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/**"
+
+permissions:
+  contents: write
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Heal missing newlines in run blocks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            if grep -q "run: |" "$f"; then
+              # ensure file ends with newline
+              printf '%s\n' "$(cat "$f")" > "$f"
+
+              # ensure every run block ends with newline safeguard
+              awk '
+                /run: \|/ { inrun=1; print; next }
+                inrun==1 {
+                  if ($0 ~ /^[^[:space:]]/ || $0 ~ /^ *-/) {
+                    print "    echo \"\"  # newline safeguard"
+                    inrun=0
+                  }
+                }
+                { print }
+              ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+            fi
+          done
+
+      - name: Commit repairs
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet; then
+            git config user.name "StegVerse Bot"
+            git config user.email "bot@stegverse.org"
+            git add .github/workflows
+            git commit -m "fix: healed missing newlines in run blocks"
+            git push
+          else
+            echo "No workflow fixes needed."
+          fi
