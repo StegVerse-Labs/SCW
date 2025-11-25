@@ -3,14 +3,17 @@
 StegVerse State Engine Reader v0 (SCW)
 
 Reads .steg/state/events.jsonl (written by state_engine.py) and
-produces a human-friendly snapshot of workflow state.
+produces:
+
+- A human-friendly Markdown snapshot of workflow state:
+    .github/docs/STATE_SNAPSHOT.md
+
+- A machine-readable JSON index of the latest event per workflow:
+    .steg/state/latest_per_workflow.json
 
 Current focus:
 - namespace = "SCW"
 - kind      = "workflow_first_aid"
-
-Output:
-- Markdown snapshot (for docs and/or GITHUB_STEP_SUMMARY)
 """
 
 import argparse
@@ -42,7 +45,9 @@ def _load_events(path: Path) -> List[Dict[str, Any]]:
     return events
 
 
-def _filter_scw_workflow_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _filter_scw_workflow_events(
+    events: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for ev in events:
         if ev.get("namespace") != "SCW":
@@ -61,7 +66,9 @@ def _parse_ts(ts: Optional[str]) -> str:
     return ts or ""
 
 
-def _build_latest_by_workflow(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _build_latest_by_workflow(
+    events: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
     """
     Returns a dict: workflow_name -> latest_event
     """
@@ -108,7 +115,9 @@ def _status_bucket(ev: Dict[str, Any]) -> str:
     return "other"
 
 
-def _render_markdown(latest: Dict[str, Dict[str, Any]]) -> str:
+def _render_markdown(
+    latest: Dict[str, Dict[str, Any]]
+) -> str:
     # Aggregate stats
     fixed = broken = dispatch_only = other = 0
     for ev in latest.values():
@@ -165,6 +174,30 @@ def _render_markdown(latest: Dict[str, Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _build_latest_json(
+    latest: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Build a compact JSON index keyed by workflow name.
+
+    This is designed specifically so future AI entities can consume
+    state without re-parsing the entire events log.
+    """
+    index: Dict[str, Any] = {}
+    for name, ev in latest.items():
+        index[name] = {
+            "status": ev.get("status"),
+            "error_type": ev.get("error_type"),
+            "post_checksum": ev.get("post_checksum"),
+            "labels": ev.get("labels") or [],
+            "namespace": ev.get("namespace"),
+            "kind": ev.get("kind"),
+            "ts": ev.get("ts"),
+            "meta": ev.get("meta") or {},
+        }
+    return index
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         description="StegVerse State Engine Reader v0 (SCW) – snapshot generator"
@@ -184,21 +217,37 @@ def main(argv: Optional[list] = None) -> int:
         default=".github/docs/STATE_SNAPSHOT.md",
         help="Output Markdown path (default: .github/docs/STATE_SNAPSHOT.md)",
     )
+    parser.add_argument(
+        "--latest-json",
+        default=".steg/state/latest_per_workflow.json",
+        help="Output JSON index path (default: .steg/state/latest_per_workflow.json)",
+    )
 
     args = parser.parse_args(argv)
 
     events_path = Path(args.events_path)
     output_path = Path(args.output)
+    latest_json_path = Path(args.latest_json)
 
     events = _load_events(events_path)
     scw_events = _filter_scw_workflow_events(events)
     latest = _build_latest_by_workflow(scw_events)
-    markdown = _render_markdown(latest)
 
+    # Markdown snapshot
+    markdown = _render_markdown(latest)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")
 
+    # JSON index
+    latest_json_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_index = _build_latest_json(latest)
+    latest_json_path.write_text(
+        json.dumps(latest_index, indent=2),
+        encoding="utf-8",
+    )
+
     print(f"Wrote state snapshot to: {output_path}")
+    print(f"Wrote latest index to:   {latest_json_path}")
     return 0
 
 
