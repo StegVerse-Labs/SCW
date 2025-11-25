@@ -3,50 +3,41 @@ name: StegVerse SCW Orchestrator
 on:
   workflow_dispatch:
     inputs:
+      target_repo:
+        description: "Repo to autopatch (e.g. StegVerse-Labs/TVC)"
+        required: true
       command:
-        description: "SCW command to run (e.g., autopatch, self-test)"
+        description: "SCW command: self-test or autopatch"
         required: true
         default: "self-test"
-      target_repo:
-        description: "Target repo for command (e.g., StegVerse-Labs/TVC)"
-        required: false
-      args_json:
-        description: "Optional JSON of arguments"
-        required: false
-  repository_dispatch:
-    types: [scw-command]
-
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
 
 jobs:
   scw:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Set up job
+        run: echo "Starting SCW job..."
+
       - name: Checkout SCW repo
         uses: actions/checkout@v4
 
       - name: Set git identity (required for autopatch commits)
         run: |
+          git config --global user.email "scw-bot@stegverse.ai"
           git config --global user.name "StegVerse-AI"
-          git config --global user.email "ai@stegverse.org"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pygithub
+        run: pip install -r scw/requirements.txt
 
       - name: Run SCW core
-        env:
-          SCW_EVENT_NAME: ${{ github.event_name }}
-          SCW_INPUT_COMMAND: ${{ inputs.command }}
-          SCW_INPUT_TARGET_REPO: ${{ inputs.target_repo }}
-          SCW_INPUT_ARGS_JSON: ${{ inputs.args_json }}
-          SCW_DISPATCH_PAYLOAD: ${{ toJson(github.event.client_payload) }}
-          GH_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
         run: |
           echo "Running SCW core..."
-          python scw/scw_core.py
+          python scw/scw_core.py \
+            "${{ github.event.inputs.command }}" \
+            --target-repo "${{ github.event.inputs.target_repo }}" \
+            --org "StegVerse-Labs"
+
+      - name: Post Checkout SCW repo
+        if: always()
+        run: echo "SCW job finished."
