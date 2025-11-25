@@ -1,0 +1,134 @@
+name: Workflows Auto-Quarantine (StegVerse State Engine)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/**"
+
+permissions:
+  contents: write
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Scan + quarantine bad workflows
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, shutil, datetime
+          from pathlib import Path
+          import yaml
+
+          ROOT = Path(".")
+          WF_DIR = ROOT / ".github" / "workflows"
+          Q_DIR  = WF_DIR / "_quarantine_auto"
+          STATE_DIR = ROOT / ".steg" / "state"
+
+          Q_DIR.mkdir(parents=True, exist_ok=True)
+          STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+          def load_yaml(p: Path):
+              try:
+                  txt = p.read_text(encoding="utf-8")
+                  yaml.safe_load(txt)
+                  return None
+              except Exception as e:
+                  return type(e).__name__
+
+          quarantined = []
+          ok_files = []
+
+          for p in sorted(WF_DIR.glob("*.y*ml")):
+              # Skip helper / quarantine files
+              if p.name.startswith("_"):
+                  continue
+
+              err = load_yaml(p)
+              if err is None:
+                  ok_files.append(p.name)
+                  continue
+
+              # Move original to quarantine
+              dest = Q_DIR / p.name
+              shutil.move(str(p), dest)
+
+              # Drop in a minimal stub so Actions UI stays happy
+              stub = f"""name: {p.stem} (quarantined)
+
+on:
+  workflow_dispatch: {{}}
+
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Original workflow moved to .github/workflows/_quarantine_auto/{p.name} due to YAML parse error ({err}).'
+"""
+              p.write_text(stub, encoding="utf-8")
+
+              quarantined.append({
+                  "file": p.name,
+                  "error": err,
+                  "quarantine_path": str(dest),
+              })
+
+          report = {
+              "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+              "quarantined": quarantined,
+              "ok": ok_files,
+          }
+
+          out = STATE_DIR / "workflows_auto_quarantine.json"
+          out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+          # Also print to logs for quick visibility
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Commit quarantine changes (if any)
+        shell: bash
+        run: |
+          set -e
+          # Show status for debugging
+          git status --porcelain .github/workflows .steg/state || true
+
+          if ! git diff --quiet -- .github/workflows .steg/state; then
+            git config user.name  "StegVerse Bot"
+            git config user.email "bot@stegverse.org"
+            git add .github/workflows .steg/state
+            git commit -m "chore(workflows): auto-quarantine unparsable workflows"
+            git push origin HEAD:main || true
+          else
+            echo "No quarantine changes to commit."
+          fi
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          echo "## Workflows Auto-Quarantine" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ".steg/state/workflows_auto_quarantine.json" ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat ".steg/state/workflows_auto_quarantine.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No auto-quarantine report produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
