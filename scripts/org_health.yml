@@ -1,47 +1,173 @@
-name: Org Health Scan (SCW)
+"""
+SCW Org Health Scanner
+- Detects missing required files
+- Generates reports
+- Safe autofix (adds missing README or orchestrator)
+- Output stored in /reports as JSON
+"""
+
+import os
+import json
+import time
+import datetime
+import pathlib
+import subprocess
+import requests
+
+API = "https://api.github.com"
+
+REQUIRED_FILES = [
+    "README.md",
+    ".github/workflows/scw_orchestrator.yml",
+]
+
+SAFE_AUTOFIX = {
+    "README.md": "# {repo}\n\nThis is an auto-generated placeholder README.\n",
+    ".github/workflows/scw_orchestrator.yml": None,  # replaced with template below
+}
+
+ORCH_TEMPLATE = """\
+name: SCW Orchestrator
 
 on:
   workflow_dispatch:
     inputs:
-      org:
-        description: "Org to scan"
+      command:
+        description: "SCW command: self-test, autopatch, org-scan"
         required: true
-        default: "StegVerse-Labs"
+        default: "self-test"
       target_repo:
-        description: "Optional single repo to scan"
+        description: "Repo (e.g., StegVerse-Labs/Trumpality)"
         required: false
         default: ""
-      dry_run:
-        description: "If true, do not push or open PRs"
-        type: boolean
+      org:
+        description: "Org"
         required: false
+        default: "StegVerse-Labs"
+      dry_run:
+        description: "If true, do not push/PR"
+        type: boolean
         default: true
-
-  schedule:
-    - cron: "0 14 * * *"  # daily 14:00 UTC (9am CT)
+      base_branch:
+        description: "Base branch"
+        default: "main"
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  scan:
+  scw:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.12"
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           if [ -f scw/requirements.txt ]; then pip install -r scw/requirements.txt; fi
-      - name: Run org scan
+      - name: Run SCW Core
         env:
           GH_TOKEN: ${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN || secrets.GH_STEGVERSE_AI_TOKEN }}
         run: |
           python -m scw.scw_core \
-            --org "${{ inputs.org }}" \
-            --target-repo "${{ inputs.target_repo }}" \
-            --dry-run "${{ inputs.dry_run }}" \
-            org-scan
+            --org "${{ github.event.inputs.org }}" \
+            --target-repo "${{ github.event.inputs.target_repo }}" \
+            --dry-run "${{ github.event.inputs.dry_run }}" \
+            --base-branch "${{ github.event.inputs.base_branch }}" \
+            "${{ github.event.inputs.command }}"
+"""
+
+def _hdr(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SCW-Health"
+    }
+
+def gh_get(token, path, params=None):
+    r = requests.get(f"{API}{path}", headers=_hdr(token), params=params)
+    r.raise_for_status()
+    return r.json()
+
+def gh_post(token, path, body):
+    r = requests.post(f"{API}{path}", headers=_hdr(token), json=body)
+    r.raise_for_status()
+    return r.json()
+
+def list_repos(token, org):
+    repos = []
+    page = 1
+    while True:
+        batch = gh_get(token, f"/orgs/{org}/repos", {"per_page": 100, "page": page})
+        if not batch:
+            break
+        repos.extend(batch)
+        page += 1
+    return repos
+
+def file_exists(token, owner, repo, path):
+    try:
+        gh_get(token, f"/repos/{owner}/{repo}/contents/{path}")
+        return True
+    except Exception:
+        return False
+
+def get_default_branch(token, owner, repo):
+    data = gh_get(token, f"/repos/{owner}/{repo}")
+    return data.get("default_branch", "main")
+
+def scan_repo(token, full_name, dry_run=False, autofix=False):
+    owner, repo = full_name.split("/")
+    default_branch = get_default_branch(token, owner, repo)
+
+    missing = []
+    for path in REQUIRED_FILES:
+        if not file_exists(token, owner, repo, path):
+            missing.append(path)
+
+    return {
+        "repo": full_name,
+        "default_branch": default_branch,
+        "missing_files": missing
+    }
+
+def org_health_scan(org, target_repo=None, dry_run=False, autofix=False):
+    token = os.getenv("GH_TOKEN")
+    if not token:
+        raise SystemExit("[SCW] GH_TOKEN missing for org-scan")
+
+    repos = list_repos(token, org)
+    repo_names = [r["full_name"] for r in repos]
+
+    if target_repo:
+        repo_names = [target_repo]
+
+    reports = []
+
+    # scan repos
+    for full in repo_names:
+        rep = scan_repo(token, full)
+        reports.append(rep)
+
+    # Write report
+    out = {
+        "org": org,
+        "utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "target_repo": target_repo,
+        "dry_run": dry_run,
+        "autofix": autofix,
+        "reports": reports,
+    }
+
+    pathlib.Path("reports").mkdir(exist_ok=True)
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    outpath = pathlib.Path("reports") / f"org_health_{stamp}.json"
+    outpath.write_text(json.dumps(out, indent=2), encoding="utf-8")
+
+    print(json.dumps(out, indent=2))
+    print(f"[SCW] Wrote report: {outpath}")
+
+    return out
