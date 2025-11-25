@@ -1,236 +1,266 @@
 #!/usr/bin/env python3
 """
-StegVerse SCW Core v3
-- self-test: validate GH_TOKEN, list visible repos in org
-- autopatch: apply minimal StegVerse repo hygiene and open PR
-Safety guards:
-  * requires explicit "autopatch" command
-  * optional allowlist
-  * dry-run supported (default false at workflow level, but recommend true for first runs)
-  * checks push permissions before pushing
+SCW Core v3 (safe)
+- Commands: self-test, autopatch
+- Requires env GH_TOKEN (mapped from org/repo secret).
+- Safe-by-default with dry_run support.
 """
 
-import argparse, os, sys, json, time, pathlib, subprocess, textwrap
-from datetime import datetime, timezone
+import argparse
+import datetime as _dt
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
+
 import requests
 
-API = "https://api.github.com"
 
-SECURITY_MD = """\
-# Security Policy
+# --------------------------
+# Helpers
+# --------------------------
 
-This is a StegVerse repository.
+def log(msg: str):
+    print(msg, flush=True)
 
-## Reporting a Vulnerability
-Please open a private security advisory or email the StegVerse maintainers
-with a clear description and reproduction steps.
 
-We aim to respond within 72 hours.
-"""
+def die(msg: str, code: int = 1):
+    log(f"[SCW] ERROR: {msg}")
+    sys.exit(code)
 
-STEGVERSE_MODULE_JSON = {
-  "name": "",
-  "description": "StegVerse module",
-  "version": "0.0.1",
-  "stegverse": {
-    "module": True,
-    "scw_managed": True,
-    "last_autopatch": ""
-  }
-}
 
-SCW_BRIDGE_REPO_YML = """\
-name: StegVerse AI Entity (Bridge)
-
-on:
-  workflow_dispatch:
-    inputs:
-      instructions:
-        description: "Optional instructions for StegVerse-AI-001"
-        required: false
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  bridge:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Placeholder
-        run: echo "Bridge workflow installed by SCW."
-"""
-
-def eprint(*a):
-    print(*a, file=sys.stderr)
-
-def get_token():
-    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    return tok.strip()
-
-def gh_api(path, token, method="GET", data=None):
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "StegVerse-SCW"
-    }
-    url = path if path.startswith("http") else f"{API}{path}"
-    r = requests.request(method, url, headers=headers, json=data)
-    if r.status_code >= 400:
-        raise requests.HTTPError(f"{method} {url} -> {r.status_code}: {r.text}", response=r)
-    return r
-
-def parse_allowlist(s):
-    if not s: return None
-    items = [x.strip() for x in s.split(",") if x.strip()]
-    return set(items) if items else None
-
-def cmd_self_test(args, token):
-    org = args.org
-    # List repos visible to token
-    repos = []
-    page = 1
-    while True:
-        r = gh_api(f"/orgs/{org}/repos?per_page=100&page={page}", token)
-        batch = r.json()
-        if not batch: break
-        repos.extend(batch)
-        page += 1
-    print(f"[SCW] Token check OK. Auth login: {gh_api('/user', token).json().get('login')}")
-    print(f"[SCW] Token can see {len(repos)} repos in {org}.")
-    samples = ", ".join([f"{org}/{x['name']}" for x in repos[:10]])
-    print(f"[SCW] Sample repos: {samples}")
-    print("[SCW] Self-test PASS.")
-
-def ensure_file(path: pathlib.Path, content: str):
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return True
-    return False
-
-def run(cmd, cwd=None, check=True):
+def run(cmd: List[str], cwd: Optional[str] = None, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a subprocess, streaming output."""
     return subprocess.run(cmd, cwd=cwd, check=check, text=True, capture_output=False)
 
-def has_push_permission(token, full_repo):
-    owner, name = full_repo.split("/", 1)
-    r = gh_api(f"/repos/{owner}/{name}", token)
-    perms = r.json().get("permissions") or {}
-    return bool(perms.get("push") or perms.get("admin"))
 
-def open_pr(token, full_repo, head, base, title, body):
-    owner, name = full_repo.split("/", 1)
-    # if PR already exists, don't fail
-    try:
-        prs = gh_api(f"/repos/{owner}/{name}/pulls?state=open&head={owner}:{head}", token).json()
-        if prs:
-            print(f"[SCW] PR already open: {prs[0].get('html_url')}")
-            return
-    except Exception:
-        pass
-    data = {"title": title, "head": head, "base": base, "body": body}
-    pr = gh_api(f"/repos/{owner}/{name}/pulls", token, method="POST", data=data).json()
-    print(f"[SCW] Opened PR: {pr.get('html_url')}")
+def sh(cmd: List[str], cwd: Optional[str] = None) -> str:
+    """Run a subprocess and return stdout."""
+    p = subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
+    return (p.stdout or "").strip()
 
-def cmd_autopatch(args, token):
-    full_repo = args.target_repo
-    allowlist = parse_allowlist(args.allowlist)
-    if allowlist and full_repo not in allowlist and full_repo.split("/",1)[1] not in allowlist:
-        print(f"[SCW] SAFETY STOP: {full_repo} not in allowlist. Skipping.")
+
+def now_stamp() -> str:
+    return _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+
+def parse_repo(full_name: str) -> Tuple[str, str]:
+    if not full_name or "/" not in full_name:
+        raise ValueError("target_repo must be like ORG/REPO")
+    org, repo = full_name.split("/", 1)
+    return org.strip(), repo.strip()
+
+
+def gh_api_headers(token: str) -> dict:
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SCW-Core"
+    }
+
+
+def get_env_token() -> str:
+    # Primary mapping from workflow:
+    # env:
+    #   GH_TOKEN: ${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN || secrets.GH_STEGVERSE_AI_TOKEN }}
+    tok = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
+    tok = tok.strip()
+    if not tok:
+        die("No GitHub token found. Ensure org/repo secret GH_STEGVERSE_*_AI_TOKEN exists and workflow maps it to env GH_TOKEN.")
+    return tok
+
+
+def make_authed_url(target_repo: str, token: str) -> str:
+    """
+    Build a PAT-auth URL for pushing.
+    We DO NOT print it anywhere.
+    """
+    org, repo = parse_repo(target_repo)
+    return f"https://x-access-token:{token}@github.com/{org}/{repo}.git"
+
+
+def gh_get(url: str, token: str):
+    r = requests.get(url, headers=gh_api_headers(token), timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"GET {url} failed: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+
+def gh_post(url: str, token: str, payload: dict):
+    r = requests.post(url, headers=gh_api_headers(token), json=payload, timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"POST {url} failed: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+
+def list_org_repos(org: str, token: str, per_page: int = 100, max_pages: int = 5) -> List[str]:
+    repos = []
+    for page in range(1, max_pages + 1):
+        url = f"https://api.github.com/orgs/{org}/repos?per_page={per_page}&page={page}"
+        data = gh_get(url, token)
+        if not data:
+            break
+        repos.extend([d["full_name"] for d in data if "full_name" in d])
+    return repos
+
+
+def default_base_branch(token: str, target_repo: str) -> str:
+    org, repo = parse_repo(target_repo)
+    url = f"https://api.github.com/repos/{org}/{repo}"
+    data = gh_get(url, token)
+    return data.get("default_branch", "main")
+
+
+# --------------------------
+# Commands
+# --------------------------
+
+@dataclass
+class Args:
+    command: str
+    target_repo: str
+    org: Optional[str]
+    base_branch: Optional[str]
+    dry_run: bool
+    patch_message: str
+
+
+def cmd_self_test(args: Args, token: str):
+    org = args.org or parse_repo(args.target_repo)[0]
+
+    log(f"[SCW] Command: self-test")
+    log(f"[SCW] Target repo: {args.target_repo}")
+    log(f"[SCW] Org: {org}")
+
+    # token auth check
+    me = gh_get("https://api.github.com/user", token)
+    login = me.get("login", "unknown")
+    log(f"[SCW] Token check OK. Auth login: {login}")
+
+    repos = list_org_repos(org, token)
+    log(f"[SCW] Token can see {len(repos)} repos in {org}.")
+    if repos:
+        sample = ", ".join(repos[:10])
+        log(f"[SCW] Sample repos: {sample}")
+
+    log("[SCW] Self-test PASS.")
+
+
+def cmd_autopatch(args: Args, token: str):
+    log(f"[SCW] Command: autopatch")
+    log(f"[SCW] Target repo: {args.target_repo}")
+    log(f"[SCW] Dry run: {args.dry_run}")
+
+    base_branch = args.base_branch or default_base_branch(token, args.target_repo)
+    log(f"[SCW] Base branch: {base_branch}")
+
+    # Work in a temp folder
+    work = os.path.abspath("workdir")
+    if os.path.exists(work):
+        run(["rm", "-rf", work], check=False)
+    os.makedirs(work, exist_ok=True)
+
+    # Clone
+    authed_url = make_authed_url(args.target_repo, token)
+    log("[SCW] Cloning target repo...")
+    run(["git", "clone", authed_url, work])
+
+    # Checkout base
+    run(["git", "checkout", base_branch], cwd=work)
+
+    # Create branch
+    branch = f"autopatch/{now_stamp()}"
+    run(["git", "checkout", "-b", branch], cwd=work)
+
+    # ---------------------------
+    # Placeholder patch logic
+    # ---------------------------
+    # This is where your real patcher would run.
+    # For safety, we only touch a tiny marker file.
+    marker_path = os.path.join(work, ".scw_autopatch_marker")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write(f"autopatch generated at {now_stamp()} UTC\n")
+
+    run(["git", "add", "-A"], cwd=work)
+
+    # If nothing changed, bail
+    status = sh(["git", "status", "--porcelain"], cwd=work)
+    if not status.strip():
+        log("[SCW] No changes detected. Exiting without PR.")
         return
 
-    if args.dry_run.lower() == "true":
-        dry_run = True
-    else:
-        dry_run = False
+    # Commit
+    msg = args.patch_message or "SCW autopatch"
+    run(["git", "commit", "-m", msg], cwd=work)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    branch = f"autopatch/{ts}"
-
-    work = pathlib.Path("/tmp/scw_work")
-    if work.exists():
-        run(["rm","-rf",str(work)])
-    work.mkdir(parents=True, exist_ok=True)
-
-    authed_url = f"https://{token}:x-oauth-basic@github.com/{full_repo}.git"
-
-    print(f"[SCW] Cloning {full_repo}...")
-    run(["git","clone",authed_url,str(work)])
-    run(["git","checkout","-b",branch], cwd=work)
-
-    changed = False
-    changed |= ensure_file(work/"SECURITY.md", SECURITY_MD)
-    # module json
-    mod_path = work/"stegverse-module.json"
-    if not mod_path.exists():
-        d = dict(STEGVERSE_MODULE_JSON)
-        d["name"] = full_repo.split("/",1)[1]
-        d["stegverse"]["last_autopatch"] = ts
-        mod_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
-        changed = True
-    else:
-        try:
-            d = json.loads(mod_path.read_text(encoding="utf-8"))
-        except Exception:
-            d = dict(STEGVERSE_MODULE_JSON)
-        d.setdefault("stegverse", {})
-        d["stegverse"]["last_autopatch"] = ts
-        mod_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
-        changed = True
-
-    bridge_path = work/".github"/"workflows"/"scw_bridge_repo.yml"
-    if not bridge_path.exists():
-        bridge_path.parent.mkdir(parents=True, exist_ok=True)
-        bridge_path.write_text(SCW_BRIDGE_REPO_YML, encoding="utf-8")
-        changed = True
-
-    if not changed:
-        print("[SCW] No changes needed; exiting.")
+    if args.dry_run:
+        log("[SCW] Dry-run enabled: skipping push + PR creation.")
         return
 
-    run(["git","add","-A"], cwd=work)
-    run(["git","config","user.name","StegVerse-AI"], cwd=work)
-    run(["git","config","user.email","stegverse-ai@users.noreply.github.com"], cwd=work)
-    run(["git","commit","-m",f"SCW autopatch {ts}"], cwd=work)
+    # -----------------------------------------
+    # PUSH FIX: ensure origin is PAT-auth URL
+    # -----------------------------------------
+    log("[SCW] Pushing branch with PAT-auth URL...")
+    run(["git", "remote", "set-url", "origin", authed_url], cwd=work)
+    run(["git", "push", "--set-upstream", "origin", branch], cwd=work)
 
-    if dry_run:
-        print("[SCW] Dry-run enabled, not pushing.")
-        return
+    # Create PR
+    org, repo = parse_repo(args.target_repo)
+    pr_title = msg
+    pr_body = "Automated autopatch generated by SCW."
+    pr_payload = {
+        "title": pr_title,
+        "head": branch,
+        "base": base_branch,
+        "body": pr_body,
+        "maintainer_can_modify": True,
+    }
 
-    if not has_push_permission(token, full_repo):
-        print("[SCW] SAFETY STOP: Token lacks push permission to this repo. No push attempted.")
-        return
+    log("[SCW] Creating PR...")
+    pr = gh_post(f"https://api.github.com/repos/{org}/{repo}/pulls", token, pr_payload)
+    pr_url = pr.get("html_url", "")
+    log(f"[SCW] PR created: {pr_url}")
 
-    print("[SCW] Pushing branch with PAT-auth URL...")
-    run(["git","push","origin",branch], cwd=work)
 
-    title = f"SCW autopatch {ts}"
-    body = "Automated StegVerse repo hygiene patch via SCW."
-    open_pr(token, full_repo, branch, args.base_branch, title, body)
-    print("[SCW] Autopatch complete.")
+# --------------------------
+# CLI
+# --------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="scw_core")
+    p.add_argument("command", choices=["self-test", "autopatch"], help="SCW command to run")
+    p.add_argument("--target-repo", required=True, help="Target repo full name ORG/REPO")
+    p.add_argument("--org", default=None, help="Org override (optional)")
+    p.add_argument("--base-branch", default=None, help="Base branch override (optional)")
+    p.add_argument("--dry-run", action="store_true", help="If set, do NOT push or open PR")
+    p.add_argument("--patch-message", default="SCW autopatch", help="Commit/PR title")
+    return p
+
 
 def main():
-    ap = argparse.ArgumentParser(prog="scw_core")
-    ap.add_argument("--org", default=None)
-    ap.add_argument("--target-repo", required=True)
-    ap.add_argument("--base-branch", default="main")
-    ap.add_argument("--dry-run", default="false")
-    ap.add_argument("--allowlist", default="")
-    ap.add_argument("command", choices=["self-test","autopatch"])
-    args = ap.parse_args()
+    parser = build_parser()
+    ns = parser.parse_args()
 
-    token = get_token()
-    if not token:
-        print("[SCW] ERROR: No GitHub token found. Ensure GH_TOKEN env is set.")
-        sys.exit(1)
+    token = get_env_token()
 
-    if not args.org:
-        args.org = args.target_repo.split("/",1)[0]
+    args = Args(
+        command=ns.command,
+        target_repo=ns.target_repo,
+        org=ns.org,
+        base_branch=ns.base_branch,
+        dry_run=bool(ns.dry_run),
+        patch_message=ns.patch_message,
+    )
 
     if args.command == "self-test":
         cmd_self_test(args, token)
-    else:
+    elif args.command == "autopatch":
         cmd_autopatch(args, token)
+    else:
+        die(f"Unknown command: {args.command}")
+
 
 if __name__ == "__main__":
     main()
