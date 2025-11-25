@@ -301,18 +301,28 @@ jobs:
           DOC.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 
-      - name: Commit console (if changed)
+            - name: Commit console (if changed)
         shell: bash
         run: |
-          set -euo pipefail
-          git add .github/docs/WORKFLOWS_CONSOLE.md || true
-          if ! git diff --cached --quiet; then
+          set -e
+
+          CONSOLE_DOC=".github/docs/WORKFLOWS_CONSOLE.md"
+
+          # Stage the console doc if it exists
+          if [ -f "$CONSOLE_DOC" ]; then
+            git add "$CONSOLE_DOC" || true
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No console changes to commit."
+          else
             git config user.name  "StegVerse Bot"
             git config user.email "bot@stegverse.org"
-            git commit -m "docs(ops): refresh Ops Console after first-aid sweep"
-            git push origin HEAD:main
-          else
-            echo "No console changes."
+            git commit -m "docs(ops): refresh Ops Console after first-aid sweep" || true
+            git push origin HEAD:main || true
+          fi
+
+          echo "console-commit-step-complete"
 
       - name: Summary
         if: always()
