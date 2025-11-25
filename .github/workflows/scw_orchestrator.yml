@@ -1,207 +1,114 @@
-name: Run SCW core
+name: StegVerse SCW Orchestrator
 
 on:
   workflow_dispatch:
     inputs:
       command:
-        description: "SCW command to run"
-        type: choice
-        options: [self-test, autopatch]
+        description: "SCW command to run (self-test, autopatch)"
         required: true
-        default: self-test
+        default: "self-test"
       target_repo:
-        description: "Full repo, e.g. StegVerse-Labs/TVC"
+        description: "Full repo name to operate on (e.g. StegVerse-Labs/TVC)"
         required: true
-        default: "StegVerse-Labs/SCW"
       org:
-        description: "Override org (optional). If blank, inferred from target_repo"
-        required: false
-        default: ""
+        description: "Owning org of the target repo (StegVerse or StegVerse-Labs)"
+        required: true
+        default: "StegVerse-Labs"
       base_branch:
-        description: "Base branch for autopatch PR"
+        description: "Base branch for autopatch (default: main)"
         required: false
         default: "main"
       dry_run:
-        description: "If true, do not push or open PRs"
-        type: boolean
+        description: "Run without pushing changes (true/false)"
         required: false
-        default: false
-
-  repository_dispatch:
-    types: [scw]
+        default: "false"
+      allowlist:
+        description: "Optional comma-separated repo allowlist"
+        required: false
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
-  issues: write
 
 jobs:
-  scw:
+  SCW:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout SCW repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Resolve inputs (workflow_dispatch + repository_dispatch)
-        id: resolve
-        shell: bash
+      - name: Map GH token and validate presence (required for SCW)
+        id: map_token
         run: |
-          set -euo pipefail
+          echo "Resolving GH token for org: ${{ github.event.inputs.org }}"
 
-          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            CMD="${{ github.event.client_payload.command || 'self-test' }}"
-            TARGET_REPO="${{ github.event.client_payload.target_repo || 'StegVerse-Labs/SCW' }}"
-            ORG_IN="${{ github.event.client_payload.org || '' }}"
-            BASE_BRANCH="${{ github.event.client_payload.base_branch || 'main' }}"
-            DRY_RUN="${{ github.event.client_payload.dry_run || 'false' }}"
+          if [ "${{ github.event.inputs.org }}" = "StegVerse-Labs" ]; then
+            echo "Using Labs token"
+            echo "GH_TOKEN=${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN }}" >> $GITHUB_ENV
           else
-            CMD="${{ inputs.command }}"
-            TARGET_REPO="${{ inputs.target_repo }}"
-            ORG_IN="${{ inputs.org }}"
-            BASE_BRANCH="${{ inputs.base_branch }}"
-            DRY_RUN="${{ inputs.dry_run }}"
+            echo "Using StegVerse token"
+            echo "GH_TOKEN=${{ secrets.GH_STEGVERSE_AI_TOKEN }}" >> $GITHUB_ENV
           fi
 
-          # infer org from target_repo if not provided
-          if [[ -z "$ORG_IN" ]]; then
-            ORG_IN="${TARGET_REPO%%/*}"
+          if [ -z "${{ env.GH_TOKEN }}" ]; then
+            echo "::error title=Missing Token::No GitHub token available. Check org and secrets."
+            exit 1
           fi
 
-          echo "command=$CMD" >> "$GITHUB_OUTPUT"
-          echo "target_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
-          echo "org=$ORG_IN" >> "$GITHUB_OUTPUT"
-          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
-          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
-
-          echo "[dispatch] Resolved inputs:"
-          echo "  command: $CMD"
-          echo "  target_repo: $TARGET_REPO"
-          echo "  org: $ORG_IN"
-          echo "  base_branch: $BASE_BRANCH"
-          echo "  dry_run: $DRY_RUN"
-
-      - name: Map GH token and validate presence (org-aware)
-        id: tokenmap
-        shell: bash
-        env:
-          # Preferred token for StegVerse-Labs targets (fine-grained)
-          GH_STEGVERSE_LABS_AI_TOKEN: ${{ secrets.GH_STEGVERSE_LABS_AI_TOKEN }}
-          # Fallback / default token
-          GH_STEGVERSE_AI_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+      - name: Resolve inputs (supports workflow_dispatch)
+        id: resolve_inputs
         run: |
-          set -euo pipefail
+          CMD="${{ github.event.inputs.command }}"
+          TARGET="${{ github.event.inputs.target_repo }}"
+          ORG="${{ github.event.inputs.org }}"
+          BASE="${{ github.event.inputs.base_branch }}"
+          DRY="${{ github.event.inputs.dry_run }}"
+          ALLOW="${{ github.event.inputs.allowlist }}"
 
-          ORG="${{ steps.resolve.outputs.org }}"
+          echo "command: $CMD"
+          echo "target_repo: $TARGET"
+          echo "org: $ORG"
+          echo "base_branch: $BASE"
+          echo "dry_run: $DRY"
+          echo "allowlist: $ALLOW"
 
-          # Pick token based on org, with safe fallback
-          if [[ "$ORG" == "StegVerse-Labs" && -n "${GH_STEGVERSE_LABS_AI_TOKEN:-}" ]]; then
-            echo "Using GH_STEGVERSE_LABS_AI_TOKEN for org StegVerse-Labs"
-            echo "GH_TOKEN=${GH_STEGVERSE_LABS_AI_TOKEN}" >> "$GITHUB_ENV"
-            echo "token_source=GH_STEGVERSE_LABS_AI_TOKEN" >> "$GITHUB_OUTPUT"
-          elif [[ -n "${GH_STEGVERSE_AI_TOKEN:-}" ]]; then
-            echo "Using GH_STEGVERSE_AI_TOKEN (default)"
-            echo "GH_TOKEN=${GH_STEGVERSE_AI_TOKEN}" >> "$GITHUB_ENV"
-            echo "token_source=GH_STEGVERSE_AI_TOKEN" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::No GitHub token found. Set org/repo secret GH_STEGVERSE_AI_TOKEN, and for Labs targets preferably GH_STEGVERSE_LABS_AI_TOKEN."
-            exit 1
-          fi
-
-          # quick empty check
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::GH_TOKEN mapped empty after selection."
-            exit 1
-          fi
-
-      - name: Preflight repo access check (read + push)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ env.GH_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          TARGET="${{ steps.resolve.outputs.target_repo }}"
-          CMD="${{ steps.resolve.outputs.command }}"
-
-          echo "Preflight: checking token access to $TARGET"
-
-          # Check repo exists and token can read it
-          HTTP_CODE=$(curl -sS -o /tmp/repo.json -w "%{http_code}" \
-            -H "Authorization: token ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${TARGET}")
-
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "::error::Token cannot read target repo ${TARGET} (HTTP ${HTTP_CODE}). Check that the secret matches the org and has repo access."
-            cat /tmp/repo.json || true
-            exit 1
-          fi
-
-          # For autopatch, we must be able to push a branch.
-          if [[ "$CMD" == "autopatch" ]]; then
-            PERM_PUSH=$(python - <<'PY'
-import json
-d=json.load(open("/tmp/repo.json"))
-print(str(d.get("permissions",{}).get("push", False)).lower())
-PY
-)
-            if [[ "$PERM_PUSH" != "true" ]]; then
-              echo "::error::Token can read but does NOT have push permission on ${TARGET}. Autopatch requires push. Fix token scopes/org access."
-              exit 1
-            fi
-          fi
-
-          echo "Preflight OK."
+          echo "CMD=$CMD" >> $GITHUB_ENV
+          echo "TARGET=$TARGET" >> $GITHUB_ENV
+          echo "ORG=$ORG" >> $GITHUB_ENV
+          echo "BASE=$BASE" >> $GITHUB_ENV
+          echo "DRY=$DRY" >> $GITHUB_ENV
+          echo "ALLOW=$ALLOW" >> $GITHUB_ENV
 
       - name: Set git identity (required for autopatch commits)
-        shell: bash
         run: |
           git config --global user.name "StegVerse-AI"
-          git config --global user.email "stegverse-ai@users.noreply.github.com"
+          git config --global user.email "ai@stegverse.local"
 
       - name: Install dependencies (safe if requirements missing)
-        shell: bash
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          if [[ -f "scw/requirements.txt" ]]; then
-            pip install -r scw/requirements.txt
+          if [ -f scw/requirements.txt ]; then
+            python -m pip install -r scw/requirements.txt
           else
-            echo "scw/requirements.txt not found; installing minimal deps"
-            pip install requests pyyaml
+            echo "No requirements.txt found — continuing"
           fi
 
       - name: Run SCW core
-        shell: bash
-        env:
-          GH_TOKEN: ${{ env.GH_TOKEN }}
         run: |
-          set -euo pipefail
-
-          CMD="${{ steps.resolve.outputs.command }}"
-          TARGET="${{ steps.resolve.outputs.target_repo }}"
-          ORG="${{ steps.resolve.outputs.org }}"
-          BASE_BRANCH="${{ steps.resolve.outputs.base_branch }}"
-          DRY_RUN="${{ steps.resolve.outputs.dry_run }}"
-
           echo "Running SCW core..."
           python scw/scw_core.py \
-            "$CMD" \
-            --target-repo "$TARGET" \
-            --org "$ORG" \
-            --base-branch "$BASE_BRANCH" \
-            $( [[ "$DRY_RUN" == "true" ]] && echo "--dry-run" )
+            --command "${CMD}" \
+            --target "${TARGET}" \
+            --org "${ORG}" \
+            --base "${BASE}" \
+            --dry "${DRY}" \
+            --allow "${ALLOW}"
 
       - name: Post-run summary
         if: always()
-        shell: bash
         run: |
           echo "SCW finished with status: ${{ job.status }}"
-          echo "Command: ${{ steps.resolve.outputs.command }}"
-          echo "Target repo: ${{ steps.resolve.outputs.target_repo }}"
-          echo "Org: ${{ steps.resolve.outputs.org }}"
-          echo "Token source: ${{ steps.tokenmap.outputs.token_source }}"
-          echo "Dry run: ${{ steps.resolve.outputs.dry_run }}"
+          echo "Command: $CMD"
+          echo "Target repo: $TARGET"
+          echo "Dry run: $DRY"
