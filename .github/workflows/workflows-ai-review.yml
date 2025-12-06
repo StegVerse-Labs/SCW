@@ -1,0 +1,246 @@
+name: Workflows AI Review (StegVerse State Engine)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".steg/state/workflows_auto_quarantine.json"
+      - ".github/workflows/_quarantine_auto/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai_review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: StegVerse-AI-Workflows-001 (repair quarantined YAML)
+        id: repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, re, pathlib, datetime
+          from pathlib import Path
+          import yaml
+
+          ROOT = Path(".")
+          WF_DIR = ROOT / ".github" / "workflows"
+          Q_DIR  = WF_DIR / "_quarantine_auto"
+          STATE_DIR = ROOT / ".steg" / "state"
+          STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+          report_path = STATE_DIR / "workflows_auto_quarantine.json"
+          if not report_path.exists():
+              print("No auto-quarantine report found; nothing to do.")
+              result = {
+                  "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                  "repaired": [],
+                  "still_broken": [],
+                  "skipped": "no_quarantine_report",
+              }
+              (STATE_DIR / "workflows_ai_review.json").write_text(
+                  json.dumps(result, indent=2),
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          auto_rep = json.loads(report_path.read_text(encoding="utf-8"))
+          quarantined = auto_rep.get("quarantined", [])
+
+          def try_parse(txt: str):
+              try:
+                  yaml.safe_load(txt)
+                  return True, None
+              except Exception as e:
+                  return False, type(e).__name__
+
+          def preclean(txt: str) -> str:
+              # Normalize newlines + BOM
+              txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+              txt = txt.lstrip("\ufeff")
+              # Tabs -> two spaces
+              txt = txt.replace("\t", "  ")
+              # Smart quotes
+              txt = txt.replace("“", "\"").replace("”", "\"").replace("‘", "'").replace("’", "'")
+              # Unicode ellipsis
+              txt = txt.replace("…", "...")
+              # Strip nasty control chars
+              txt = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", txt)
+
+              # Inline env: env: {A: x, B: y} -> block
+              def fix_env(m):
+                  base = m.group(1)
+                  inner = m.group(2)
+                  out = [f"{base}env:\n"]
+                  for part in inner.split(","):
+                      part = part.strip()
+                      if not part:
+                          continue
+                      if ":" in part:
+                          k, v = part.split(":", 1)
+                          out.append(f"{base}  {k.strip()}: {v.strip()}\n")
+                  return "".join(out)
+
+              txt = re.sub(r"^(\s*)env:\s*\{\s*([^}]+)\s*\}\s*$", fix_env, txt, flags=re.M)
+
+              # Top-level 'workflows:' -> 'jobs:'
+              txt = re.sub(r"(?m)^\s*workflows\s*:\s*$", "jobs:", txt)
+              return txt
+
+          def inject_run_for_steps(txt: str) -> str:
+              """
+              Very conservative: if a step has '- name:' and no 'run:',
+              but we see script-ish lines under it, inject 'run: |'.
+              """
+              lines = txt.splitlines()
+              out = []
+              i = 0
+              while i < len(lines):
+                  line = lines[i]
+                  out.append(line)
+
+                  m_name = re.match(r'^(\s*)-\s+name:\s', line)
+                  if not m_name:
+                      i += 1
+                      continue
+
+                  base_indent = len(m_name.group(1))
+                  j = i + 1
+                  saw_run = False
+                  script_lines = 0
+
+                  while j < len(lines):
+                      ln = lines[j]
+                      if re.match(r'^\s*-\s+name:\s', ln):
+                          break
+                      if re.match(r'^\S', ln):
+                          # New top-level section
+                          break
+                      if re.match(r'^\s*run\s*:', ln):
+                          saw_run = True
+                      if re.match(r'^\s*(git|curl|python|bash|sh|node|echo|set -e|set -eu|set -euo)\b', ln.lstrip()):
+                          script_lines += 1
+                      j += 1
+
+                  if script_lines and not saw_run:
+                      run_indent = " " * (base_indent + 2)
+                      out.append(f"{run_indent}run: |\n")
+                      k = i + 1
+                      while k < j:
+                          ln = lines[k]
+                          if ln.strip() and not ln.lstrip().startswith("#") and not re.match(r'^\s*\w+\s*:', ln):
+                              out.append(" " * (base_indent + 4) + ln.lstrip())
+                          else:
+                              out.append(ln)
+                          k += 1
+                      i = j - 1  # we've already copied up to j-1
+
+                  i += 1
+
+              return "\n".join(out) + ("\n" if lines else "")
+
+          repaired = []
+          still_broken = []
+
+          for entry in quarantined:
+              fname = entry.get("file")
+              if not fname:
+                  continue
+
+              q_path = Q_DIR / fname
+              orig_path = WF_DIR / fname
+
+              if not q_path.exists():
+                  still_broken.append({
+                      "file": fname,
+                      "reason": "quarantine_file_missing",
+                  })
+                  continue
+
+              raw = q_path.read_text(encoding="utf-8", errors="ignore")
+
+              # Pass 1: preclean
+              txt1 = preclean(raw)
+              ok1, err1 = try_parse(txt1)
+              if ok1:
+                  orig_path.write_text(txt1, encoding="utf-8")
+                  repaired.append({"file": fname, "method": "preclean"})
+                  continue
+
+              # Pass 2: run-injection + preclean combo
+              txt2 = inject_run_for_steps(txt1)
+              ok2, err2 = try_parse(txt2)
+              if ok2:
+                  orig_path.write_text(txt2, encoding="utf-8")
+                  repaired.append({"file": fname, "method": "preclean+run_injection"})
+                  continue
+
+              # Still broken
+              still_broken.append({
+                  "file": fname,
+                  "error_after_preclean": err1,
+                  "error_after_run_injection": err2,
+              })
+
+          result = {
+              "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+              "repaired": repaired,
+              "still_broken": still_broken,
+              "source_report": "workflows_auto_quarantine.json",
+          }
+
+          out_path = STATE_DIR / "workflows_ai_review.json"
+          out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+          print(json.dumps(result, indent=2))
+PY
+
+      - name: Commit AI repairs (if any)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- .github/workflows .steg/state; then
+            git config user.name  "StegVerse Bot"
+            git config user.email "bot@stegverse.org"
+            git add .github/workflows .steg/state
+            git commit -m "chore(workflows): AI review repairs for quarantined workflows" || true
+            git push origin HEAD:main || true
+          else
+            echo "No AI repairs to commit."
+          fi
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## Workflows AI Review (StegVerse-AI-Workflows-001)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ".steg/state/workflows_ai_review.json" ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat ".steg/state/workflows_ai_review.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No AI review report found._" >> "$GITHUB_STEP_SUMMARY"
+          fi
