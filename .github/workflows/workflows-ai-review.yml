@@ -4,22 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "What to review"
-        type: choice
-        required: true
-        default: "summary-only"
-        options:
-          - summary-only
-          - workflows-state
-          - full
+        description: "Review mode (analysis-only | patch | full)"
+        required: false
+        default: "full"
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
   pull-requests: write
 
 jobs:
   ai_review:
     runs-on: ubuntu-latest
+
+    env:
+      AI_MODE: ${{ inputs.mode }}
+      GH_AI_TOKEN: ${{ secrets.GH_STEGVERSE_AI_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -27,27 +29,408 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show context
-        run: |
-          echo "AI Review placeholder running in repo: $GITHUB_REPOSITORY"
-          echo "Mode: ${{ github.event.inputs.mode }}"
-          echo "Commit: $GITHUB_SHA"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      # NOTE: This is a safe placeholder step. Once this is running reliably
-      # and the Run button is visible, we can wire in real AI logic here.
-      - name: Placeholder AI Review
+      - name: Install deps
+        shell: bash
         run: |
-          echo "----------------------------------------"
-          echo " StegVerse Labs :: SCW :: AI Review Stub"
-          echo "----------------------------------------"
-          echo "This workflow is VALID and runnable."
-          echo "Next step is to plug in real AI review logic."
-          echo ""
-          echo "You can confirm by:"
-          echo "  • Opening the Actions tab"
-          echo "  • Selecting 'Workflows AI Review (SCW)'"
-          echo "  • Clicking 'Run workflow' (pick a mode)"
-          echo ""
-          echo "Once confirmed, we'll upgrade this step into"
-          echo "a full AI reviewer that reads .steg/state/*,"
-          echo "checks workflows, and opens Issues/PR comments."
+          set -e
+          python -m pip install --upgrade pip
+          pip install pyyaml openai
+
+      - name: AI Review + State Engine integration
+        id: ai_review
+        shell: bash
+        run: |
+          set -e
+
+          python - << 'PY'
+          import os, json, hashlib, datetime, textwrap
+          from pathlib import Path
+
+          import yaml
+
+          # ---------- Setup paths ----------
+          ROOT = Path(".")
+          WF_DIR = ROOT / ".github" / "workflows"
+          STEG_DIR = ROOT / ".steg"
+          STATE_DIR = STEG_DIR / "state"
+          SUGG_DIR = STEG_DIR / "ai_suggestions" / "workflows"
+          DOCS_DIR = ROOT / ".github" / "docs"
+
+          STATE_DIR.mkdir(parents=True, exist_ok=True)
+          SUGG_DIR.mkdir(parents=True, exist_ok=True)
+          DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+          latest_path = STATE_DIR / "ai_review_latest.json"
+          summary_path = STATE_DIR / "ai_review_last_run.json"
+          history_path = STATE_DIR / "ai_review_history.json"
+
+          try:
+              prev_latest = json.loads(latest_path.read_text(encoding="utf-8"))
+          except Exception:
+              prev_latest = {}
+
+          mode = (os.getenv("AI_MODE") or "full").strip().lower()
+          allow_patch = mode in ("patch", "full")
+          allow_llm = bool(os.getenv("OPENAI_API_KEY")) and mode == "full"
+
+          # ---------- Helpers ----------
+          def sha256_bytes(data: bytes) -> str:
+              import hashlib as _h
+              h = _h.sha256()
+              h.update(data)
+              return h.hexdigest()
+
+          def load_yaml(path: Path):
+              try:
+                  data = yaml.safe_load(path.read_text(encoding="utf-8"))
+                  return data, None
+              except Exception as e:
+                  return None, e
+
+          def has_dispatch(model) -> bool:
+              if not isinstance(model, dict):
+                  return False
+              on = model.get("on")
+              if on is None:
+                  return False
+              if isinstance(on, str):
+                  return on == "workflow_dispatch"
+              if isinstance(on, list):
+                  return "workflow_dispatch" in on
+              if isinstance(on, dict):
+                  # don't force onto reusable-only workflows
+                  return "workflow_dispatch" in on and set(on.keys()) != {"workflow_call"}
+              return False
+
+          def ensure_dispatch(model) -> bool:
+              """
+              Inject workflow_dispatch when safe.
+              Returns True if modified.
+              """
+              if not isinstance(model, dict):
+                  return False
+              on = model.get("on")
+              if on is None:
+                  model["on"] = {"workflow_dispatch": {}}
+                  return True
+
+              if isinstance(on, str):
+                  if on == "workflow_call":
+                      return False
+                  model["on"] = {on: {}}
+                  model["on"]["workflow_dispatch"] = {}
+                  return True
+
+              if isinstance(on, list):
+                  if "workflow_call" in on and len(on) == 1:
+                      return False
+                  mapping = {k: {} for k in on if isinstance(k, str)}
+                  mapping.setdefault("workflow_dispatch", {})
+                  model["on"] = mapping
+                  return True
+
+              if isinstance(on, dict):
+                  if set(on.keys()) == {"workflow_call"}:
+                      return False
+                  if "workflow_dispatch" not in on:
+                      on["workflow_dispatch"] = {}
+                      return True
+
+              return False
+
+          # ---------- Scan workflows ----------
+          per_file = {}
+          patched_files = []
+          broken_files = []
+          ok_files = []
+          no_dispatch_files = []
+          llm_targets = []
+
+          for path in sorted(WF_DIR.glob("*.y*ml")):
+              rel = str(path.relative_to(ROOT))
+              raw = path.read_bytes()
+              digest = sha256_bytes(raw)
+
+              model, err = load_yaml(path)
+              parse_status = "ok" if err is None else type(err).__name__
+              status = "ok" if err is None else "broken"
+
+              had_dispatch = has_dispatch(model) if err is None else False
+              modified = False
+
+              # Optional auto-patch: inject workflow_dispatch
+              if allow_patch and err is None:
+                  if ensure_dispatch(model):
+                      yaml_text = yaml.safe_dump(
+                          model,
+                          sort_keys=False,
+                          allow_unicode=True,
+                      )
+                      path.write_text(yaml_text, encoding="utf-8")
+                      modified = True
+                      had_dispatch = True
+                      patched_files.append(path.name)
+
+              if err is not None:
+                  broken_files.append(path.name)
+              else:
+                  ok_files.append(path.name)
+                  if not had_dispatch:
+                      no_dispatch_files.append(path.name)
+
+              # Basic structural info
+              triggers = []
+              jobs = []
+              if isinstance(model, dict):
+                  on = model.get("on")
+                  if isinstance(on, str):
+                      triggers = [on]
+                  elif isinstance(on, list):
+                      triggers = [str(x) for x in on if isinstance(x, str)]
+                  elif isinstance(on, dict):
+                      triggers = list(on.keys())
+                  if isinstance(model.get("jobs"), dict):
+                      jobs = list(model["jobs"].keys())
+
+              per_file[path.name] = {
+                  "path": rel,
+                  "sha256": digest,
+                  "parse_status": parse_status,
+                  "status": status,
+                  "has_dispatch": had_dispatch,
+                  "triggers": triggers,
+                  "jobs": jobs,
+                  "modified_this_run": modified,
+              }
+
+          # ---------- Drift / change classification ----------
+          prev_hashes = {
+              name: info.get("sha256")
+              for name, info in (prev_latest or {}).items()
+          }
+
+          changed = []
+          new_files = []
+          deleted = []
+
+          for name, info in per_file.items():
+              old = prev_hashes.get(name)
+              if old is None:
+                  new_files.append(name)
+                  info["change_kind"] = "new"
+              elif old != info["sha256"]:
+                  changed.append(name)
+                  info["change_kind"] = "modified"
+              else:
+                  info["change_kind"] = "unchanged"
+
+          for old_name in prev_hashes.keys():
+              if old_name not in per_file:
+                  deleted.append(old_name)
+
+          # ---------- History & summary ----------
+          now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+          summary = {
+              "timestamp": now,
+              "mode": mode,
+              "total": len(per_file),
+              "ok": len(ok_files),
+              "broken": len(broken_files),
+              "no_dispatch": len(no_dispatch_files),
+              "patched": patched_files,
+              "changed": changed,
+              "new_files": new_files,
+              "deleted": deleted,
+          }
+
+          latest_path.write_text(json.dumps(per_file, indent=2), encoding="utf-8")
+          summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+          # Append to history for "heatmap" style later use
+          try:
+              history = json.loads(history_path.read_text(encoding="utf-8"))
+              if not isinstance(history, list):
+                  history = []
+          except Exception:
+              history = []
+          history.append(summary)
+          # keep last 100 entries
+          history = history[-100:]
+          history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+          # ---------- AI suggestions (optional, feature 9) ----------
+          openai_key = os.getenv("OPENAI_API_KEY") or ""
+          if allow_llm and openai_key:
+              try:
+                  from openai import OpenAI
+                  client = OpenAI(api_key=openai_key)
+              except Exception:
+                  client = None
+
+              if client is not None:
+                  # Target only broken + modified files to keep token usage sane
+                  for name, info in per_file.items():
+                      if info["status"] == "broken" or info["change_kind"] in ("modified", "new"):
+                          llm_targets.append(name)
+
+                  llm_targets = llm_targets[:10]  # safety cap
+
+                  for wf_name in llm_targets:
+                      path = WF_DIR / wf_name
+                      try:
+                          wf_text = path.read_text(encoding="utf-8")
+                      except Exception:
+                          continue
+
+                      prompt = textwrap.dedent(f"""
+                      You are a senior DevOps engineer reviewing a GitHub Actions workflow.
+
+                      Repository: {os.getenv("GITHUB_REPOSITORY", "unknown")}
+                      File: {wf_name}
+
+                      TASKS:
+                      1. Identify any YAML or structural issues that could break the workflow.
+                      2. Flag suspicious 'run' steps (especially heredocs / EOF blocks) that could cause 'unexpected end of file'.
+                      3. Suggest concrete improvements, including:
+                         - Removing obviously dead or redundant steps.
+                         - Converting long bash blobs into clearer, safer scripts.
+                         - Ensuring a safe trigger configuration (do NOT add dangerous auto-deploy triggers).
+                      4. Output a short Markdown report with:
+                         - A summary
+                         - Bullet list of issues
+                         - Bullet list of recommended edits
+
+                      IMPORTANT:
+                      - Do NOT invent repository secrets or external URLs.
+                      - Keep suggestions actionable but concise.
+
+                      Here is the current YAML:
+
+                      ```yaml
+                      {wf_text}
+                      ```
+                      """)
+
+                      try:
+                          resp = client.chat.completions.create(
+                              model="gpt-4o-mini",
+                              messages=[
+                                  {"role": "system", "content": "You are a concise, meticulous GitHub Actions and DevOps expert."},
+                                  {"role": "user", "content": prompt},
+                              ],
+                              max_tokens=900,
+                          )
+                          text = resp.choices[0].message.content
+                      except Exception as e:
+                          text = f"AI suggestion failed for {wf_name}: {e!r}"
+
+                      out_path = SUGG_DIR / f"{wf_name}.md"
+                      out_path.write_text(text, encoding="utf-8")
+
+          # ---------- Update / append docs (feature 3, 5, 6, 8) ----------
+          ai_doc = DOCS_DIR / "AI_REVIEW_SUMMARY.md"
+          lines = []
+          lines.append("# Workflows AI Review — Latest Run")
+          lines.append("")
+          lines.append(f"- Timestamp (UTC): **{now}**")
+          lines.append(f"- Mode: **{mode}**")
+          lines.append(f"- Total workflows: **{len(per_file)}**")
+          lines.append(f"- ✅ OK: **{len(ok_files)}**")
+          lines.append(f"- ❌ Broken: **{len(broken_files)}**")
+          lines.append(f"- ➖ No dispatch: **{len(no_dispatch_files)}**")
+          lines.append(f"- 🩹 Patched this run: **{len(patched_files)}**")
+          lines.append(f"- 🔁 Changed since last AI review: **{len(changed)}**")
+          lines.append(f"- 🆕 New: **{len(new_files)}**, 🗑️ Deleted: **{len(deleted)}**")
+          lines.append("")
+          if broken_files:
+              lines.append("## Broken workflows")
+              lines.append("")
+              for name in broken_files:
+                  info = per_file.get(name, {})
+                  lines.append(f"- `{name}` — parse status: `{info.get('parse_status')}`")
+              lines.append("")
+          if patched_files:
+              lines.append("## Patched (workflow_dispatch injected)")
+              lines.append("")
+              for name in patched_files:
+                  lines.append(f"- `{name}`")
+              lines.append("")
+          if llm_targets:
+              lines.append("## AI suggestion files")
+              lines.append("")
+              lines.append("_Per-workflow reports written under `.steg/ai_suggestions/workflows/`._")
+              for name in llm_targets:
+                  lines.append(f"- `{name}` → `.steg/ai_suggestions/workflows/{name}.md`")
+              lines.append("")
+          ai_doc.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          # Also append/refresh a small section in WORKFLOWS_CONSOLE.md if it exists
+          console = DOCS_DIR / "WORKFLOWS_CONSOLE.md"
+          if console.exists():
+              existing = console.read_text(encoding="utf-8")
+              marker = "## Latest AI Review"
+              new_block = []
+              new_block.append(marker)
+              new_block.append("")
+              new_block.append(f"- Timestamp (UTC): **{now}**")
+              new_block.append(f"- ✅ OK: **{len(ok_files)}**, ❌ Broken: **{len(broken_files)}**, ➖ No dispatch: **{len(no_dispatch_files)}**")
+              new_block.append(f"- 🩹 Patched this run: **{len(patched_files)}**, 🔁 Changed since last AI review: **{len(changed)}**")
+              new_block.append("")
+              new_block.append("_See `AI_REVIEW_SUMMARY.md` and `.steg/ai_suggestions/workflows/*` for details._")
+              new_block.append("")
+              new_block_text = "\n".join(new_block)
+
+              if marker in existing:
+                  head, _sep, _tail = existing.partition(marker)
+                  console.write_text(head.rstrip() + "\n\n" + new_block_text + "\n", encoding="utf-8")
+              else:
+                  console.write_text(existing.rstrip() + "\n\n" + new_block_text + "\n", encoding="utf-8")
+
+          # Emit a minimal log summary for the job log
+          print("AI review summary:")
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Commit AI review artifacts (if changed)
+        shell: bash
+        run: |
+          set -e
+          # Stage workflows (if auto-patched), state, and docs
+          git add .github/workflows || true
+          git add .steg/state || true
+          git add .steg/ai_suggestions || true
+          git add .github/docs/AI_REVIEW_SUMMARY.md || true
+          git add .github/docs/WORKFLOWS_CONSOLE.md || true
+
+          if git diff --cached --quiet; then
+            echo "No AI-review changes to commit."
+          else
+            git config user.name  "StegVerse AI Bot"
+            git config user.email "ai-bot@stegverse.org"
+            git commit -m "chore(workflows): AI review autopatch + state update"
+            git push origin HEAD:main || true
+          fi
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          echo "## Workflows AI Review (SCW)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ".steg/state/ai_review_last_run.json" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat ".steg/state/ai_review_last_run.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Per-workflow details: .steg/state/ai_review_latest.json_" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_No AI review summary file produced; see logs for details._" >> "$GITHUB_STEP_SUMMARY"
+          fi
